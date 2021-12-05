@@ -20,9 +20,6 @@
 // https://github.com/curl/curl/issues/5102
 // https://forums.cryptlex.com/t/valgrind-reports-memory-leak-on-linux/773
 
-// TODO? use async (multi_*) instead? This would open multiple connections to the
-// same host, but would also help deal with slow hosts like angelfire.
-
 // Also TODO (later): Leaky bucket to throttle request rate, and proper data
 // structures instead of std::string and std::vector<char> (must at least include
 // metadata).
@@ -50,9 +47,13 @@ class response {
 		std::vector<char> data;
 };
 
-// metadata telling the coordinator about our ops
+// Metadata telling the coordinator about our ops
 
 enum slurper_signal { S_WORK_DONE, S_QUIT };
+
+// NOTE: This doesn't actually initialize an easy_handle until an
+// URL is prepared. The reason is to make copy constructors less of
+// a pain while interfacing to a C-idiom library (as libcurl is).
 
 class easy_handle_container {
 	private:
@@ -68,10 +69,6 @@ class easy_handle_container {
 		void init() {
 			handle = curl_easy_init();
 
-			//curl_easy_setopt(handle, CURLOPT_VERBOSE, 1);
-
-			curl_easy_setopt(handle, CURLOPT_USERAGENT,
-				"Mozilla/5.0 (compatible; bot-SpiderOfZZT/0.1)");
 			curl_easy_setopt(handle, CURLOPT_ERRORBUFFER, err_buf);
 			// ?? What would happen if this fails?
 			curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, store_data);
@@ -79,8 +76,12 @@ class easy_handle_container {
 
 			// Set stuff we'd rather want to have
 			// User agent, etc. TODO
+			curl_easy_setopt(handle, CURLOPT_USERAGENT,
+				"Mozilla/5.0 (compatible; bot-SpiderOfZZT/0.1)");
 			curl_easy_setopt(handle, CURLOPT_FILETIME, 1);
-			// 5 minutes timeout
+
+			// 5 minutes timeout. We can be generous as it's going to be used
+			// asynchronously.
 			curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, 300L);
 			curl_easy_setopt(handle, CURLOPT_TIMEOUT, 300L);
 
@@ -89,9 +90,11 @@ class easy_handle_container {
 			curl_easy_setopt(handle, CURLOPT_PRIVATE, this);
 		}
 
-		// Sets URL and clears the buffer
+		// Inits if required, then sets URL and clears the buffer
 		void prepare_download(std::string URL) {
-			init();
+			if (handle == NULL) {
+				init();
+			}
 			requested_URL = URL;
 			curl_easy_setopt(handle, CURLOPT_URL, URL.c_str());
 
