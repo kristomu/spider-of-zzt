@@ -37,7 +37,7 @@
 #include <thread>
 #include "slurper.h"
 
-#include "dns.cc"
+#include "adns/adns.cc"
 
 // Ugly as sin. TODO: Replace with a proper library that can handle mailto etc.
 std::string hostname(const std::string url) {
@@ -99,7 +99,7 @@ int main() {
 		seen.insert(host);
 	}
 
-	dns_lookup.lookup(hostnames, 5, false);
+	dns_lookup.lookup(hostnames, 5);
 	host_to_IPs = dns_lookup.host_to_IPs;
 
 	// Second pass: Assign each URL to the appropriate host IP.

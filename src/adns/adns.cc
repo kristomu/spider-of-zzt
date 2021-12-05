@@ -1,7 +1,3 @@
-// ARES is *slow!* ADNS seems to be much faster, at least 10x
-
-// Oops, I misunderstood wildcards. I'll probably just yank all the wildcard code.
-
 #include <adns.h>
 
 #include <iostream>
@@ -15,100 +11,8 @@
 #include <netdb.h>
 #include <arpa/inet.h>
 
-// Return all substrings of haystack that begin in needle. This is used for
-// generating wildcard domains.
-std::vector<std::string> all_substrs(const std::string & haystack,
-	const std::string & needle) {
+#include "resolved_host.h"
 
-	std::vector<std::string> output;
-
-	for (size_t i = haystack.find(needle, 0);
-		 	i != std::string::npos && i < haystack.size();
-			i = haystack.find(needle, i+1)) {
-
-			output.push_back(haystack.substr(i));
-		}
-
-	return output;
-}
-
-// Should this contain a port so that each thread only accesses a particular
-// host:port combination? I don't think that's necessary so far...
-class resolved_host {
-	private:
-		// If possibly_IP is an IP address, set the resolved host to this IP and
-		// return true, otherwise return false.
-		bool import_ip(std::string possibly_IP);
-
-	public:
-		bool ipv6;
-		in_addr ipv4_addr;
-		in6_addr ipv6_addr;
-		std::string rendered_ip() const;
-
-		friend bool operator<(const resolved_host & lhs,
-			const resolved_host & rhs) {
-
-			return lhs.rendered_ip() < rhs.rendered_ip();
-		}
-
-		// If possibly_IP is an IP address, set the resolved host to this IP and
-		// return true, otherwise return false.
-		bool update_with_ip(std::string possibly_IP);
-};
-
-// Produce a human-readable rendering of the IP stored in this object
-std::string resolved_host::rendered_ip() const {
-	char ipbuf[INET6_ADDRSTRLEN];
-
-	if (ipv6) {
-		inet_ntop(AF_INET6, &ipv6_addr, ipbuf, sizeof(ipbuf));
-	} else {
-		inet_ntop(AF_INET, &ipv4_addr, ipbuf, sizeof(ipbuf));
-	}
-
-	return ipbuf;
-}
-
-bool resolved_host::update_with_ip(std::string possibly_IP) {
-
-	// First check the traditional type of IP address (v4 and v6).
-	if (inet_pton(AF_INET, possibly_IP.data(), &ipv4_addr) == 1) {
-		ipv6 = false;
-		return true;
-	}
-
-	if (inet_pton(AF_INET6, possibly_IP.data(), &ipv6_addr) == 1) {
-		ipv6 = true;
-		return true;
-	}
-
-	// Try to convert a raw number into an IPv4 address.
-	char * end = NULL;
-	long int x = strtol(possibly_IP.data(), &end, 0);
-	size_t chars_in_number = end - possibly_IP.data();
-	// If we didn't use the whole string when converting to a number,
-	// that means the conversion was unsuccessful.
-	if (chars_in_number != possibly_IP.size()) {
-		return false;
-	}
-
-	// If the conversion was successful and within range, convert to
-	// canonical form. NOTE: This does not recognize 0 as 0.0.0.0, but
-	// that's not a valid address anyway so...
-	if (x < UINT_MAX) {
-		in_addr converted;
-		converted.s_addr = htonl(x);
-
-		char buf[INET_ADDRSTRLEN];
-		if (inet_ntop(AF_INET, &converted, buf, sizeof(buf)) != NULL) {
-			std::cout << possibly_IP << ": ipv4 address " << buf << std::endl;
-			return true;
-		}
-	}
-
-	return false;
-}
 
 // For keeping a record of a lookup failure.
 class lookup_failure {
@@ -135,14 +39,6 @@ class adns_lookup {
 		std::string nameservers_to_strcfg(
 			const std::vector<std::string> & nameservers);
 
-		// Get a list of wildcard domains that, if it exists,
-		// would automatically resolve that host.
-		std::set<std::string> get_wildcard_domains(
-			const std::string & host);
-
-		std::vector<std::string> get_wildcard_domains(
-			const std::vector<std::string> & hosts);
-
 		adns_state ads;
 		adns_queryflags query_flags;
 
@@ -164,7 +60,7 @@ class adns_lookup {
 		adns_lookup (const adns_lookup & other) = delete;
 
 		void lookup(const std::vector<std::string> & hosts,
-			int retries, bool check_wildcards);
+			int retries);
 };
 
 dns_errtype adns_lookup::error_type(adns_status error) const {
@@ -216,45 +112,6 @@ std::string adns_lookup::nameservers_to_strcfg(
 	return output;
 }
 
-std::set<std::string> adns_lookup::get_wildcard_domains(
-	const std::string & host) {
-
-	std::set<std::string> wildcards_set;
-
-	std::vector<std::string> host_suffixes = all_substrs(
-		host, ".");
-	if (host_suffixes.empty()) {
-		return wildcards_set;
-	}
-
-	host_suffixes.pop_back(); // Don't want e.g. ".com"
-	for (std::string superdomain: host_suffixes) {
-		wildcards_set.insert("*" + superdomain);
-	}
-
-	return wildcards_set;
-}
-
-std::vector<std::string> adns_lookup::get_wildcard_domains(
-	const std::vector<std::string> & hosts) {
-
-	std::set<std::string> wildcards_set;
-
-	// This is somewhat slow. Fix if it becomes troublesome.
-	for (std::string host: hosts) {
-		for (std::string wildcard: get_wildcard_domains(host)) {
-			wildcards_set.insert(wildcard);
-		}
-	}
-
-	std::vector<std::string> wildcards;
-	std::copy(wildcards_set.begin(), wildcards_set.end(),
-		std::back_inserter(wildcards));
-
-	return wildcards;
-}
-
-
 adns_lookup::adns_lookup(const std::vector<std::string> & name_servers) {
 	// Set up the ADNS state (with proper parameters)
 	adns_initflags flags = (adns_initflags)(adns_if_nosigpipe | adns_if_noerrprint);
@@ -277,12 +134,7 @@ adns_lookup::~adns_lookup() {
 }
 
 void adns_lookup::lookup(const std::vector<std::string> & hosts,
-	int retries, bool check_wildcards) {
-
-	// If we're asked to check wildcards, first do lookups on them.
-	if (check_wildcards) {
-		lookup(get_wildcard_domains(hosts), retries, false);
-	}
+	int retries) {
 
 	std::vector<adns_query> queries;
 
@@ -301,19 +153,6 @@ void adns_lookup::lookup(const std::vector<std::string> & hosts,
 			std::cout << "Exact match: " << host << std::endl;
 			continue;
 		}
-
-		// If we have entries for applicable wildcard hosts, use them
-		// instead of looking up again.
-		bool found_wildcard = false;
-		for (std::string wildcard: get_wildcard_domains(host)) {
-			if (host_to_IPs.find(wildcard) != host_to_IPs.end()) {
-				host_to_IPs[host] = host_to_IPs[wildcard];
-				found_wildcard = true;
-				std::cout << "Wildcard match: " << host << " <- " << wildcard << std::endl;
-			}
-		}
-
-		if (found_wildcard) { continue; }
 
 		// If this host is an IP address, just push it onto the map.
 		if (resolved.update_with_ip(host)) {
@@ -436,8 +275,8 @@ void adns_lookup::lookup(const std::vector<std::string> & hosts,
 /*
 int main() {
 	adns_lookup dns_lookup({"8.8.8.8", "8.8.4.4"});
-	dns_lookup.lookup({"ns1.wordpress.com", "ns2.wordpress.com"}, 3, true);
-	dns_lookup.lookup({"www.wordpress.com", "*.blogspot.com"}, 3, true);
+	dns_lookup.lookup({"ns1.wordpress.com", "ns2.wordpress.com"}, 3);
+	dns_lookup.lookup({"www.wordpress.com", "*.blogspot.com"}, 3);
 
 	for (lookup_failure failed: dns_lookup.failures) {
 		std::cout << "Failed: " << failed.addrtype << ", " << failed.hostname << std::endl;
