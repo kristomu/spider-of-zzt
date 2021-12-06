@@ -44,7 +44,7 @@ int main() {
 	// Wait on this thread just for a proof of concept.
 	do {
 		sleep(1);
-	} while (!slurpers[0].is_idle());
+	} while (!slurper_queues[0]->work_done());
 
 	// Shut down the threads
 	for (auto pos = slurper_queues.begin(); pos != slurper_queues.end(); ++pos) {

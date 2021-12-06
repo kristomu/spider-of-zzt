@@ -33,6 +33,7 @@
 #include <netdb.h>
 
 #include <unistd.h>
+#include <nspr/prinit.h>
 
 #include <thread>
 #include "slurper.h"
@@ -275,6 +276,9 @@ int main() {
 	time_t after_dl = time(NULL);
 
 	curl_global_cleanup();
+
+	// Deal with some still reachable stuff to please valgrind.
+	PR_Cleanup();
 
 	std::vector<response> responses;
 	response_queue->output(responses);

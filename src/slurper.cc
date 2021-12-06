@@ -16,10 +16,8 @@ size_t easy_handle_container::store_data(char *ptr, size_t size, size_t nmemb,
 }
 
 // Initialize the class.
-// TODO, various strategies go here. No redirects, timeouts, user agent, ...
 void curl_slurper::init(int ID) {
 	slurper_ID = ID;
-	//curl_global_init(CURL_GLOBAL_ALL).
 }
 
 // Perhaps this should be in easy_handle_container instead? TODO?
@@ -109,39 +107,29 @@ void curl_slurper::continuous_download(
 	set_done(false);
 
 	int numfds, handles_running, msgs_left;
-	std::multiset<easy_handle_container *> containers_accounted_for;
-	std::multiset<easy_handle_container *> unaccounted_containers;
+	int URLs_running = 0;
 
-	// HACK
-	for (int i = 0; i < max_connections; ++i) {
-		unaccounted_containers.insert(new
-				easy_handle_container());
-	}
-
-	while (working || !containers_accounted_for.empty()) {
-		// Signal for more if we're empty
-		if (work_queue_ptr->empty()) {
-			set_idle(true);
-		}
-
+	while (working) {
 		// Create new handles for every URL that's queued. libcurl will make sure
 		// that we don't connect with more than a given number of connections
 		// for this multi_connection, so we don't have to keep track of that
-		// ourselves. Note: may consume quite a bit of memory.
-		// Might also cause problems if we exhaust the number of fds the OS has
-		// to offer.
+		// ourselves.
+
+		// Since the timeout counters start counting when the handle is added,
+		// not when the connection is actually made, we don't want to spam too
+		// much. Hence we strictly limit the number of URLs running (i.e. sent
+		// to libcurl) to max_connections.
 
 		std::pair<bool, work_order> URL_or_none;
-		do {
-			if (unaccounted_containers.empty()) { continue; }
+		URL_or_none.first = true;
+
+		while (URLs_running < max_connections
+			&& URL_or_none.first) {
+
 			URL_or_none = work_queue_ptr->poll_dequeue();
 			if (!URL_or_none.first) {
-				//std::cout << "Queue is empty." << std::endl;
-				// TODO: sleep 100 ms here
 				continue;
 			}
-
-			set_idle(false);
 
 			work_order work = URL_or_none.second;
 
@@ -156,17 +144,15 @@ void curl_slurper::continuous_download(
 
 			// Is the work order for some DNS info?
 			if (work.type == W_HOST_IP) {
-				// TODO: Somehow deal with existing easy handles
-				// now having a stale list... (since I imagine the pointer
-				// changes - or does it?)
-				// Also I'd rather not want to have to specify all these
-				// port numbers, particularly when I also have to deal with
-				// FTP, gopher, etc...
+				// Add the required DNS information to the DNS cache.
+				// In theory there might be a problem with stale pointers to
+				// the dns cache as we append new information, but it seems
+				// to work in practice -- probably because it's a linked
+				// list.
 				dns_cache = curl_slist_append(dns_cache,
 					std::string(work.hostname + ":443:" + work.IP).data());
 				dns_cache = curl_slist_append(dns_cache,
 					std::string(work.hostname + ":80:" + work.IP).data());
-				//for (easy_handle * eh: )
 				work_queue_ptr->notify_work_done();
 				continue;
 			}
@@ -179,17 +165,15 @@ void curl_slurper::continuous_download(
 
 			// Perhaps there's a better way (possibly with a finite pool or
 			// something), but I haven't found one yet. Fix later.
-			easy_handle_container * new_url_req = *unaccounted_containers.begin();
-			unaccounted_containers.erase(new_url_req);
+			easy_handle_container * new_url_req = new easy_handle_container;
 
 			curl_easy_setopt(new_url_req->handle, CURLOPT_SHARE, share);
 			curl_easy_setopt(new_url_req->handle, CURLOPT_RESOLVE, dns_cache);
 			new_url_req->prepare_download(work.URL);
-			containers_accounted_for.insert(new_url_req);
+
 			curl_multi_add_handle(multi_handle, new_url_req->handle);
-			// Timeout counters start counting when the handle is added, not when
-			// the connection is actually made, so we don't want to spam too much.
-		} while (URL_or_none.first && !unaccounted_containers.empty() && containers_accounted_for.size() < max_connections);
+			++URLs_running;
+		}
 
 		// Wait for something to happen.
 		curl_multi_poll(multi_handle, NULL, 0, poll_wait_time, &numfds);
@@ -201,18 +185,16 @@ void curl_slurper::continuous_download(
 			if(msg->msg == CURLMSG_DONE) {
 				easy_handle_container * handle_done;
 				curl_easy_getinfo(msg->easy_handle, CURLINFO_PRIVATE, &handle_done);
-				// Quick and dirty. TODO, improve.
 
 				// Dump the response to the appropriate queue, and signal that the
 				// work is done.
 				results_queue->enqueue(create_response(*handle_done, *msg));
 				work_queue_ptr->notify_work_done();
+				--URLs_running;
 
 				// Detach the container from the multi_handle, then remove the latter.
 				curl_multi_remove_handle(multi_handle, msg->easy_handle);
-				containers_accounted_for.erase(handle_done);
-				unaccounted_containers.insert(handle_done);
-				//delete handle_done;
+				delete handle_done;
 			} else {
 				std::cout << "Something strange: " << msg->msg << std::endl;
 			}

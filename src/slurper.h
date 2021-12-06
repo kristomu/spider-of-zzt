@@ -162,17 +162,12 @@ class work_order {
 class curl_slurper {
 
 	private:
-		bool idle, done;
+		bool done;
 		int slurper_ID;
 
 		mutable std::mutex idle_mutex;
 
 		void init(int ID);
-
-		void set_idle(bool idle_status) {
-			std::lock_guard<std::mutex> lock(idle_mutex);
-			idle = idle_status;
-		}
 
 		void set_done(bool done_status) {
 			std::lock_guard<std::mutex> lock(idle_mutex);
@@ -197,11 +192,6 @@ class curl_slurper {
 
 		void operator=(const curl_slurper & in) {
 			slurper_ID = in.slurper_ID;
-		}
-
-		bool is_idle() const {
-			std::lock_guard<std::mutex> lock(idle_mutex);
-			return idle;
 		}
 
 		bool is_done() const {
