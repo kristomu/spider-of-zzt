@@ -1,3 +1,6 @@
+// TODO: Rate-limiting. Probably just "ms per request", then check whenever we
+// would add another request, if the last request happened too recently.
+
 #include "slurper.h"
 
 #include <iostream>

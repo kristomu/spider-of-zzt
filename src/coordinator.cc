@@ -39,6 +39,7 @@
 #include "slurper.h"
 
 #include "adns/adns.cc"
+#include "zzt_interesting.cc"
 
 // Ugly as sin. TODO: Replace with a proper library that can handle mailto etc.
 std::string hostname(const std::string url) {
@@ -288,7 +289,7 @@ int main() {
 
 	for (const response & res: responses) {
 		std::cout << "Response: URL: " << res.requested_URL << " error: "
-			<< res.error << " data size: " << res.data.size() << std::endl;
+			<< res.error << " data size: " << res.data.size() << " interest:" << data_interest_type(res.requested_URL, "", res.data) << std::endl;
 	}
 
 	std::cout << "Phase three completed at " << now_str() << std::endl;
