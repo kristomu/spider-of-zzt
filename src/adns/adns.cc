@@ -13,7 +13,6 @@
 
 #include "resolved_host.h"
 
-
 // For keeping a record of a lookup failure.
 class lookup_failure {
 	public:
