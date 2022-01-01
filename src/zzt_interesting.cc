@@ -624,9 +624,15 @@ std::string data_interest_archive(const std::string & file_path,
 	std::string inner_interest_type = "";
 	std::runtime_error inherited_exception("placeholder");
 	bool got_exception = false;
+	ret_val = ARCHIVE_OK;
 
 	while (inner_interest_type == "" &&
-		(ret_val = archive_read_next_header(cur_archive, &entry)) == ARCHIVE_OK) {
+		(ret_val == ARCHIVE_OK || ret_val == ARCHIVE_WARN)) {
+
+		ret_val = archive_read_next_header(cur_archive, &entry);
+		if (ret_val != ARCHIVE_OK && ret_val != ARCHIVE_WARN) {
+			continue;
+		}
 
 		// Work around a libarchive limitation where non-ASCII letters can
 		// cause archive_entry_pathname to return NULL.
@@ -768,7 +774,7 @@ std::string data_interest_type(const std::string & file_path,
 	// BRD file, always check. This is sufficiently prone to false positives
 	// that we only check with the correct extension.
 	if (str_contains(extension, {".brd"})) {
-		if (is_brd(contents_bytes)) { return ".brd"; }
+		if (is_brd(contents_bytes)) { return "brd"; }
 	}
 
 	// Don't check images, audio files or video files.
