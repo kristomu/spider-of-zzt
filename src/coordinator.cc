@@ -289,7 +289,7 @@ int main() {
 
 	for (const response & res: responses) {
 		std::cout << "Response: URL: " << res.requested_URL << " error: "
-			<< res.error << " data size: " << res.data.size() << " interest:" << data_interest_type(res.requested_URL, "", res.data) << std::endl;
+			<< res.error << " data size: " << res.data.size() << " interest:" << highest_priority_interest_type(res.requested_URL, "", res.data) << std::endl;
 	}
 
 	std::cout << "Phase three completed at " << now_str() << std::endl;

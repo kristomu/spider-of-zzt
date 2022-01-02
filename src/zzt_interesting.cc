@@ -133,6 +133,10 @@ bool str_contains(const std::string & haystack,
 	return false;
 }
 
+bool str_contains(const std::string & haystack, std::string needle) {
+	return haystack.find(needle) != std::string::npos;
+}
+
 // Given and index into a string corresponding to the start and end of a substring
 // match, this returns the window number of characters to the left of this region.
 // It also returns the whole word if there's a word (i.e. sequence bracketed by
@@ -564,6 +568,9 @@ std::string data_interest_html(const std::vector<char> & contents_bytes) {
 
 // Something like...
 
+const int PRI_KEYWORD = 1, PRI_EXTENSION = 2,
+			PRI_CONTENT = 3;
+
 class interest_data {
 	public:
 		bool archive;
@@ -595,13 +602,14 @@ class interest_data {
 			}
 		}
 
-		bool interesting() { return interest_type != ""; }
+		bool interesting() const { return interest_type != ""; }
 
 		interest_data() {}
 
 		// TODO also priority
-		interest_data(const std::string & interest_type_in) {
+		interest_data(int priority_in, const std::string & interest_type_in) {
 			archive = false;
+			priority = priority_in;
 			interest_type = interest_type_in;
 		}
 };
@@ -648,7 +656,6 @@ std::vector<interest_data> data_interest_archive(const std::string & file_path,
 			err));
 	}
 
-	interest_data inner_interest_data;
 	std::runtime_error inherited_exception("placeholder");
 	bool got_exception = false;
 	ret_val = ARCHIVE_OK;
@@ -710,7 +717,8 @@ std::vector<interest_data> data_interest_archive(const std::string & file_path,
 				file_path.end());
 			if (str_contains(extension, { ".zzt", ".brd", ".mzx", ".mzb", ".szt",
 				".zzm", ".zzl", ".zz3"})) {
-				inner_interest_data.interest_type = "extension";
+				interest_data inner_interest_data(PRI_EXTENSION,
+					"extension");
 				interesting_in_file.push_back(inner_interest_data);
 			}
 		}
@@ -752,7 +760,7 @@ std::vector<interest_data> data_interest_archive(const std::string & file_path,
 			archive_error_string(cur_archive)));
 	}
 
-	if (inner_interest_data.interest_type == "" && got_exception) {
+	if (interesting_files.empty() && got_exception) {
 		throw(inherited_exception);
 	}
 
@@ -781,32 +789,36 @@ std::vector<interest_data> data_interest_type(const std::string & file_path,
 	// If it has the proper extension for files we can't verify the contents
 	// of, that's interesting.
 	if (str_contains(extension, { ".mzx", ".mzb", ".zz3", ".zzl", ".zzm" })) {
-		return {interest_data("extension")};
+		return {interest_data(PRI_EXTENSION, "extension")};
 	}
 
 	std::string szt_zzt;
 
 	// ZZT save files are denoted .SAV and are really just ZZT files. Check
 	// for them. (BLUESKY: also check MegaZeux saves, which share the extension).
+	// TODO: move a bunch of the string to interest data stuff to the internal
+	// functions.
 	if (str_contains(extension, { ".szt", ".zzt", ".sav"})) {
 		szt_zzt = zzt_szt_check(contents_bytes, false);
 	} else {
 		szt_zzt = zzt_szt_check(contents_bytes, true);
 	}
 
-	if (szt_zzt != "") { return {interest_data(szt_zzt)}; }
+	if (szt_zzt != "") { return {interest_data(PRI_CONTENT, szt_zzt)}; }
 
 	// SZT and ZZT are sufficiently rare extensions that we flag them even if
 	// the above check doesn't trigger. This is useful for corrupted compressed
 	// data or data compressed using an unsupported method such as Implode.
-	if (str_contains(extension, { ".szt", ".zzt" })) {
-		return {interest_data("extension")};
+	if (str_contains(extension, std::vector<std::string>({ ".szt", ".zzt"}))) {
+		return {interest_data(PRI_EXTENSION, "extension")};
 	}
 
 	// BRD file, always check. This is sufficiently prone to false positives
 	// that we only check with the correct extension.
-	if (str_contains(extension, {".brd"})) {
-		if (is_brd(contents_bytes)) { return {interest_data("brd")}; }
+	if (str_contains(extension, ".brd")) {
+		if (is_brd(contents_bytes)) {
+			return {interest_data(PRI_CONTENT, "brd")};
+		}
 	}
 
 	// Don't check images, audio files or video files.
@@ -814,25 +826,27 @@ std::vector<interest_data> data_interest_type(const std::string & file_path,
 		return {};
 	}
 	// Or Shockwave Flash files
-	if (str_contains(mime_type, {"application/x-shockwave-flash"})) {
+	if (str_contains(mime_type, "application/x-shockwave-flash")) {
 		return {};
 	}
 
 	// TODO: XML?
-	if (str_contains(mime_type, {"html"})) {
+	if (str_contains(mime_type, "html")) {
 		std::string possible_interest = data_interest_html(contents_bytes);
-		if (possible_interest != "") { return {interest_data(possible_interest)}; }
+		if (possible_interest != "") {
+			return { interest_data(PRI_KEYWORD, possible_interest)}; }
 	}
 
 	// Stringify the contents so we can search it with data_interest_text.
 	// TODO: make the latter work directly on the vectors.
 	std::string contents_text = to_str(contents_bytes);
 
-	if (str_contains(mime_type, {"text/"})) {
+	if (str_contains(mime_type, "text/")) {
 		// Text stuff goes here. Since all our search terms are pure ASCII,
 		// there's no need for Unicode shenanigans (yet).
 		std::string possible_interest = data_interest_text(contents_text, true);
-		if (possible_interest != "") { return {interest_data(possible_interest)}; }
+		if (possible_interest != "") {
+			return {interest_data(PRI_KEYWORD, possible_interest)}; }
 	}
 
 	// I think I've got all the formats libarchive supports -- except mtree and zip.uu.
@@ -886,7 +900,8 @@ std::vector<interest_data> data_interest_type(const std::string & file_path,
 	// If all else fails, look for keywords in the binary stream.
 	// TODO: Don't call this if we checked a text or html file.
 	std::string possible_interest = data_interest_binary_text(contents_text, true);
-	if (possible_interest != "") { return {interest_data(possible_interest)}; }
+	if (possible_interest != "") {
+		return { interest_data(PRI_KEYWORD, possible_interest)}; }
 
 	return {};
 
@@ -902,6 +917,26 @@ std::vector<std::string> data_interest_type(const std::string & file_path,
 	}
 
 	return results;
+}
+
+std::string highest_priority_interest_type(const std::string & file_path,
+	const std::string & mime_type, const std::vector<char> & contents_bytes) {
+
+	std::vector<interest_data> interesting_files =
+		data_interest_type(file_path, mime_type, contents_bytes, 3);
+
+	int record_priority = INT_MIN;
+	std::string recordholder = "";
+
+	for (const interest_data & id: interesting_files) {
+		if (!id.interesting() || id.priority < record_priority) {
+			continue;
+		}
+		record_priority = id.priority;
+		recordholder = id.str();
+	}
+
+	return recordholder;
 }
 
 // --- //
