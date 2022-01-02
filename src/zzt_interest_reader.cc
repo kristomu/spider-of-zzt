@@ -14,9 +14,9 @@ int main(int argc, char ** argv) {
 
 		//std::cerr << argv[i] << std::endl;
 		std::vector<char> data = file_to_vector(argv[i]);
-		std::string interest = data_interest_type(argv[i], "", data);
-		if (interest == "") { continue; }
-		std::cout << argv[i];// << std::flush;
-		std::cout << "\t" << interest << "\n";
+		std::vector<std::string> interests = data_interest_type(argv[i], "", data);
+		for (std::string interest: interests) {
+			std::cout << argv[i] << "\t" << interest << "\n";
+		}
 	}
 }

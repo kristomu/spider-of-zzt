@@ -72,8 +72,8 @@ std::vector<char> byte_seq(const char * what, int length) {
 	return std::vector<char>(what, what+length);
 }
 
-std::vector<char> vec(const char * what) {
-	return std::vector<char>(what, what+strlen(what));
+std::vector<char> vecs(std::string what) {
+	return std::vector<char>(what.begin(), what.end());
 }
 
 // Return a lowercased version of a string or substring.
@@ -344,7 +344,7 @@ bool is_brd(const std::vector<char> & contents_bytes) {
 	brd_header possible_header;
 	memcpy(&possible_header, contents_bytes.data(), sizeof(brd_header));
 
-	if (possible_header.board_size < 53 || possible_header.board_size >
+	if (possible_header.board_size < 53 || (size_t)possible_header.board_size >
 		contents_bytes.size()*2) { return false; }
 	if (possible_header.title_length > 50 || possible_header.title_length < 0) {
 		return false;
@@ -420,7 +420,7 @@ std::string data_interest_text(const std::string & body_text, bool exclude_long_
 				if (!matched) { continue; }
 				// If searching for the substring would put us out
 				// of bounds, skippity.
-				if (substr_pos < fm.offset ||
+				if ((int)substr_pos < fm.offset ||
 					substr_pos + fm.false_match.size() - fm.offset >
 						body_text.size()) {
 					continue;
@@ -549,8 +549,6 @@ std::string data_interest_html(const std::vector<char> & contents_bytes) {
 		return ""; // Error parsing document.
 	}
 
-	xmlNode * root = xmlDocGetRootElement(doc);
-
 	std::string interest_type = data_interest_html(xmlDocGetRootElement(doc));
 
 	xmlFreeDoc(doc);	// Free the document we read.
@@ -568,21 +566,49 @@ std::string data_interest_html(const std::vector<char> & contents_bytes) {
 
 class interest_data {
 	public:
-		bool interesting;
-		int priority; // higher is more important
-		std::string internal_path;
+		bool archive;
+		int priority;				// higher is more important
+		std::string internal_path;	// treats archives as directories
 		std::string interest_type;
-		std::string error;
+
+		// Perhaps add this:
+		//std::string error;
+		// which denotes a non-fatal error that might still produce false
+		// negatives (e.g. unsupported compression method, corrupted file).
+
+		// HACK. TODO: Do an overload instead
+		std::string str() const {
+			std::string interest_string;
+
+			if (interest_type == "") {
+				return interest_string;
+			}
+
+			if (internal_path == "") {
+				return interest_type;
+			}
+
+			if (archive) {
+				return "archive[" + internal_path + "]:" + interest_type;
+			} else {
+				return internal_path + ":" + interest_type;
+			}
+		}
+
+		bool interesting() { return interest_type != ""; }
+
+		interest_data() {}
+
+		// TODO also priority
+		interest_data(const std::string & interest_type_in) {
+			archive = false;
+			interest_type = interest_type_in;
+		}
 };
 
-// perhaps? Where interesting is true/false, internal_path is an internal path
-// in an archive structure, and error is an error that might lead to a false
-// negative (e.g. corrupted files, unsupported compression method).
-// But should I then make every function return this struct? TODO.
-
-std::string data_interest_type(const std::string & file_path,
+std::vector<interest_data> data_interest_type(const std::string & file_path,
 	std::string mime_type, const std::vector<char> & contents_bytes,
-	int recursion_level, std::string & internal_path);
+	int recursion_level);
 
 std::string coarse_libarchive_error(int ret_val) {
 	switch(ret_val) {
@@ -597,11 +623,12 @@ std::string coarse_libarchive_error(int ret_val) {
 // Check if an archive contains interesting files. The recursion level parameter
 // stops quines and ZIP bombs from causing infinite loops.
 
-std::string data_interest_archive(const std::string & file_path,
-	const std::vector<char> & contents_bytes, int recursion_level,
-	std::string & internal_path) {
+std::vector<interest_data> data_interest_archive(const std::string & file_path,
+	const std::vector<char> & contents_bytes, int recursion_level) {
 
-	if (recursion_level <= 0) { return ""; }
+	std::vector<interest_data> interesting_files;
+
+	if (recursion_level <= 0) { return interesting_files; }
 
 	archive * cur_archive;
 	archive_entry * entry;
@@ -621,13 +648,14 @@ std::string data_interest_archive(const std::string & file_path,
 			err));
 	}
 
-	std::string inner_interest_type = "";
+	interest_data inner_interest_data;
 	std::runtime_error inherited_exception("placeholder");
 	bool got_exception = false;
 	ret_val = ARCHIVE_OK;
 
-	while (inner_interest_type == "" &&
-		(ret_val == ARCHIVE_OK || ret_val == ARCHIVE_WARN)) {
+	std::vector<interest_data> interesting_in_file;
+
+	while (ret_val == ARCHIVE_OK || ret_val == ARCHIVE_WARN) {
 
 		ret_val = archive_read_next_header(cur_archive, &entry);
 		if (ret_val != ARCHIVE_OK && ret_val != ARCHIVE_WARN) {
@@ -646,14 +674,15 @@ std::string data_interest_archive(const std::string & file_path,
 
 		size_t inner_file_size = archive_entry_size(entry);
 
-		// Avoid ZIP bombs and other very large files. (16M max)
-		if (inner_file_size > (1<<24)) { continue; }
+		// Avoid ZIP bombs and other very large files. (32M max)
+		if (inner_file_size > (1<<25)) { continue; }
 
 		std::vector<char> unpacked_bytes(inner_file_size);
 		int bytes_read = archive_read_data(cur_archive, unpacked_bytes.data(),
 			unpacked_bytes.size());
 
-		// Check if the compression method is supported.
+		// Check if the compression method is supported. If not, clear the data
+		// array so we can still check for extensions and the likes.
 		if (bytes_read < 0) {
 			std::cerr << "xERROR: " << file_path << "\t" << archive_error_string(cur_archive) << std::endl;
 			unpacked_bytes.resize(0);
@@ -661,9 +690,8 @@ std::string data_interest_archive(const std::string & file_path,
 		}
 
 		try {
-			inner_interest_type = data_interest_type( file_path + "/" +
-				inner_pathname, "", unpacked_bytes, recursion_level-1,
-				internal_path);
+			interesting_in_file = data_interest_type( file_path + "/" +
+				inner_pathname, "", unpacked_bytes, recursion_level-1);
 		} catch (const std::runtime_error & e) {
 			// If we got an exception, the rule is: if we find something else that's
 			// interesting, forget it happened; but if we don't find anything, then
@@ -675,26 +703,32 @@ std::string data_interest_archive(const std::string & file_path,
 
 		// If we didn't find anything, but the file has the right extension, report
 		// interest from the extension itself, as we're a bit more lenient here than
-		// with uncompressed files. (XXX: Why?)
-		if (inner_interest_type == "") {
+		// with uncompressed files. (XXX: Why? I think it's because the file may
+		// be corrupted.)
+		if (interesting_in_file.empty()) {
 			std::string extension = lower(file_path.begin() + file_path.size() - 4,
 				file_path.end());
 			if (str_contains(extension, { ".zzt", ".brd", ".mzx", ".mzb", ".szt",
 				".zzm", ".zzl", ".zz3"})) {
-				inner_interest_type = "extension";
+				inner_interest_data.interest_type = "extension";
+				interesting_in_file.push_back(inner_interest_data);
 			}
 		}
 
-		// Keep track of the path inside the archives. This is really really ugly.
-		// TODO: Fix (must be redesigned, most likely).
-		if (inner_interest_type != "") {
-			if (internal_path == "") {
-				internal_path = inner_pathname;
+		// Append the path to the archive to the interest data so that whatever
+		// is calling us will know where the interesting files are stored. Also
+		// set the archive bit and push the interest data to interesting_files.
+
+		for (interest_data id: interesting_in_file) {
+			id.archive = true;
+
+			if (id.internal_path == "") {
+				id.internal_path = inner_pathname;
 			} else {
-				internal_path = inner_pathname + "/" + internal_path;
+				id.internal_path = inner_pathname + "/" + id.internal_path;
 			}
-		} else {
-			internal_path = "";
+
+			interesting_files.push_back(id);
 		}
 	}
 
@@ -718,24 +752,22 @@ std::string data_interest_archive(const std::string & file_path,
 			archive_error_string(cur_archive)));
 	}
 
-	if (inner_interest_type == "" && got_exception) {
+	if (inner_interest_data.interest_type == "" && got_exception) {
 		throw(inherited_exception);
 	}
 
-	return inner_interest_type;
+	return interesting_files;
 }
 
-// internal_path is used for getting the full path when recursing out of
-// archive files, and should not be set except by data_interest_type itself.
-// recursion_level is also used internally, so ditto.
+// recursion_level is used internally (see data_interest_archive).
 
 // TODO: Return three values: the path to the file that's interesting,
 // the way it's interesting, and any potential errors. Perhaps also a bool
 // denoting whether it *is* interesting.
 
-std::string data_interest_type(const std::string & file_path,
+std::vector<interest_data> data_interest_type(const std::string & file_path,
 	std::string mime_type, const std::vector<char> & contents_bytes,
-	int recursion_level, std::string & internal_path) {
+	int recursion_level) {
 
 	std::string magic_mime_type = get_magic_mimetype(contents_bytes);
 
@@ -749,7 +781,7 @@ std::string data_interest_type(const std::string & file_path,
 	// If it has the proper extension for files we can't verify the contents
 	// of, that's interesting.
 	if (str_contains(extension, { ".mzx", ".mzb", ".zz3", ".zzl", ".zzm" })) {
-		return "extension";
+		return {interest_data("extension")};
 	}
 
 	std::string szt_zzt;
@@ -762,34 +794,34 @@ std::string data_interest_type(const std::string & file_path,
 		szt_zzt = zzt_szt_check(contents_bytes, true);
 	}
 
-	if (szt_zzt != "") { return szt_zzt; }
+	if (szt_zzt != "") { return {interest_data(szt_zzt)}; }
 
 	// SZT and ZZT are sufficiently rare extensions that we flag them even if
 	// the above check doesn't trigger. This is useful for corrupted compressed
 	// data or data compressed using an unsupported method such as Implode.
 	if (str_contains(extension, { ".szt", ".zzt" })) {
-		return "extension";
+		return {interest_data("extension")};
 	}
 
 	// BRD file, always check. This is sufficiently prone to false positives
 	// that we only check with the correct extension.
 	if (str_contains(extension, {".brd"})) {
-		if (is_brd(contents_bytes)) { return "brd"; }
+		if (is_brd(contents_bytes)) { return {interest_data("brd")}; }
 	}
 
 	// Don't check images, audio files or video files.
 	if (str_contains(mime_type, {"audio/", "video/", "image/"})) {
-		return "";
+		return {};
 	}
 	// Or Shockwave Flash files
 	if (str_contains(mime_type, {"application/x-shockwave-flash"})) {
-		return "";
+		return {};
 	}
 
 	// TODO: XML?
 	if (str_contains(mime_type, {"html"})) {
 		std::string possible_interest = data_interest_html(contents_bytes);
-		if (possible_interest != "") { return possible_interest; }
+		if (possible_interest != "") { return {interest_data(possible_interest)}; }
 	}
 
 	// Stringify the contents so we can search it with data_interest_text.
@@ -800,7 +832,7 @@ std::string data_interest_type(const std::string & file_path,
 		// Text stuff goes here. Since all our search terms are pure ASCII,
 		// there's no need for Unicode shenanigans (yet).
 		std::string possible_interest = data_interest_text(contents_text, true);
-		if (possible_interest != "") { return possible_interest; }
+		if (possible_interest != "") { return {interest_data(possible_interest)}; }
 	}
 
 	// I think I've got all the formats libarchive supports -- except mtree and zip.uu.
@@ -836,10 +868,11 @@ std::string data_interest_type(const std::string & file_path,
 
 	if (archive || maybe_archive) {
 		try {
-			std::string possible_interest = data_interest_archive(file_path,
-				contents_bytes, recursion_level, internal_path);
-			if (possible_interest != "") {
-				return possible_interest;
+			std::vector<interest_data> interesting_in_file =
+				data_interest_archive(file_path, contents_bytes,
+					recursion_level);
+			if (!interesting_in_file.empty()) {
+				return interesting_in_file;
 			}
 		} catch (const std::runtime_error & e) {
 			// Don't signal corrupt archive file for something that's primarily not
@@ -853,24 +886,22 @@ std::string data_interest_type(const std::string & file_path,
 	// If all else fails, look for keywords in the binary stream.
 	// TODO: Don't call this if we checked a text or html file.
 	std::string possible_interest = data_interest_binary_text(contents_text, true);
-	if (possible_interest != "") { return possible_interest; }
+	if (possible_interest != "") { return {interest_data(possible_interest)}; }
 
-	return "";
+	return {};
 
 }
 
-std::string data_interest_type(const std::string & file_path,
+std::vector<std::string> data_interest_type(const std::string & file_path,
 	const std::string & mime_type, const std::vector<char> & contents_bytes) {
 
-	std::string internal_path;
-	std::string interest = data_interest_type(file_path, mime_type, contents_bytes, 3,
-		internal_path);
-
-	if (internal_path != "") {
-		return "archive[" + internal_path + "]:" + interest;
-	} else {
-		return interest;
+	std::vector<std::string> results;
+	for (const interest_data & id: data_interest_type(
+		file_path, mime_type, contents_bytes, 3)) {
+		results.push_back(id.str());
 	}
+
+	return results;
 }
 
 // --- //
@@ -878,54 +909,57 @@ std::string data_interest_type(const std::string & file_path,
 bool is_data_interesting(std::string filename, std::string mime_type,
 	const std::vector<char> & contents_bytes) {
 
-	return data_interest_type(filename, mime_type, contents_bytes) != "";
+	return !data_interest_type(filename, mime_type, contents_bytes).empty();
 }
 
 // TODO: Add more tests from Python
 
 bool TEST_interesting() {
 	std::vector<std::vector<char> > must_be_interesting = {
-		vec("I like ZZT!"),
-		vec("I like ZZTop and ZZT!"),
-		vec("ZZT is my favorite game"),
-		vec("ZZTers and MZXers welcome"),
-		vec("MZXers and zzters welcome"),
-		vec("I heard there's a game called zzt"),
+		vecs("I like ZZT!"),
+		vecs("I like ZZTop and ZZT!"),
+		vecs("ZZT is my favorite game"),
+		vecs("ZZTers and MZXers welcome"),
+		vecs("MZXers and zzters welcome"),
+		vecs("I heard there's a game called zzt or something"),
+		// TODO: Make this work (i.e. ZZT must be a word, but doesn't need
+		// to be flanked by spaces)
+		//vecs("I heard there's a game called zzt."),
 		byte_seq("ladeda\x00" " ZZT \x00", 13)
 	};
 
 	std::vector<std::vector<char> > must_be_uninteresting = {
-		vec("I like ZZTop!"),
-		vec("Lyrics ZZTop Lyrics"),
-		vec("I LIKE ZZTOP!"),
-		vec("i like zztop."),
-		vec("It went BZZT!"),
-		vec("DRIZZT IS THE COOLEST DROW"),
-		vec("Jazztones"),
-		vec("Fuzztrio"),
-		vec("BUZZTHRILL"),
-		vec("BZZZT"),
-		vec("The explosion fizzled with a fzzt"),
+		vecs("I like ZZTop!"),
+		vecs("Lyrics ZZTop Lyrics"),
+		vecs("I LIKE ZZTOP!"),
+		vecs("i like zztop."),
+		vecs("It went BZZT!"),
+		vecs("DRIZZT IS THE COOLEST DROW"),
+		vecs("Jazztones"),
+		vecs("Fuzztrio"),
+		vecs("BUZZTHRILL"),
+		vecs("BZZZT"),
+		vecs("The explosion fizzled with a fzzt"),
 		// High-entropy strings that sometimes appear in Blogspot HTML files.
-		vec("window['__wavt'] = 'AOuZoY5I4fZZTlyPDxtXnUDukaEWGpHwrQ:1632960341455';_Widget"),
-		vec("<br />RsJ4NMZXYyyEdGrVjPlaolMdrCDGfsmzNeLU8kcFmr24xU6Y4AZ4nVJ87gaR5pINT/RIV0zm"),
+		vecs("window['__wavt'] = 'AOuZoY5I4fZZTlyPDxtXnUDukaEWGpHwrQ:1632960341455';_Widget"),
+		vecs("<br />RsJ4NMZXYyyEdGrVjPlaolMdrCDGfsmzNeLU8kcFmr24xU6Y4AZ4nVJ87gaR5pINT/RIV0zm"),
 		// Very long string with match at the end, and at the beginning
-		vec("__________________________________________________mzx"),
-		vec("zzt_______________________________________________"),
+		vecs("__________________________________________________mzx"),
+		vecs("zzt_______________________________________________"),
 		// Serial numbers found in the Geocities archive
-		vec("/FMD027877 pw/EMZXPYEI"),
-		vec("WA5ZZT") //Ham radio code
+		vecs("/FMD027877 pw/EMZXPYEI"),
+		vecs("WA5ZZT") //Ham radio code
 	};
 
 	bool all_OK = true;
 
-	/*for (std::vector<char> test_str: must_be_interesting) {
+	for (std::vector<char> test_str: must_be_interesting) {
 		if (!is_data_interesting("test.txt", "text/plain", test_str)) {
-			std::cerr << "Test fail: " << std::string(test_str.data())
+			std::cerr << "Test fail: " << std::string(test_str.begin(), test_str.end())
 				<< " not interesting.\n";
 			all_OK = false;
 		}
-	}*/
+	}
 
 	for (std::vector<char> test_str: must_be_uninteresting) {
 		// Test both plaintext and binary data. Nothing that's uninteresting for
