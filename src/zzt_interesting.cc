@@ -606,7 +606,6 @@ class interest_data {
 
 		interest_data() {}
 
-		// TODO also priority
 		interest_data(int priority_in, const std::string & interest_type_in) {
 			archive = false;
 			priority = priority_in;

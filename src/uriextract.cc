@@ -10,6 +10,7 @@
 #include <fstream>
 #include <sstream>
 #include <iostream>
+#include <algorithm>
 #include <cstring>
 #include <string>
 
@@ -17,6 +18,7 @@
 #include <re2/set.h>
 
 #include "libvldmail/vldmail.h"
+#include "cxxurl/url.hpp"
 
 // For testing purposes.
 
@@ -144,6 +146,43 @@ bool contains(const std::string & haystack, const std::string & needle) {
 	return (haystack.find(needle) != std::string::npos);
 }
 
+// https://stackoverflow.com/a/1323374
+bool valid_netloc_char(char x) {
+	std::string special_chars = "@-_.:[]";
+
+	return (x >= 'A' && x <= 'Z') || (x >= 'a' && x <= 'z') ||
+		(x >= '0' && x <= '9') ||
+		(special_chars.find_first_of(x) != std::string::npos);
+}
+
+bool has_valid_netloc(const std::string & url_str) {
+	try {
+		Url url(url_str);
+		if (contains(url.host(), "..")) {
+			return false;
+		}
+		for (char x: url.host()) {
+			if (!valid_netloc_char(x)) {
+				return false;
+			}
+		}
+		return true;
+	} catch (Url::parse_error & err) {
+		// Handle known false positive errors:
+		//	- file:// says port is wrong
+		//	- mailto: URIs with IP address says path is wrong
+		// It is known to handle http and https well.
+
+		// This is ugly...
+		std::string manual_schema = split_any(url_str, ":")[0];
+		if (manual_schema == "https" || manual_schema == "http") {
+			return false;
+		}
+
+		return contains(err.what(), "Path") || contains(err.what(), "Port");
+	}
+}
+
 // To reduce false positives, we need a list of valid TLDs.
 std::set<std::string> get_valid_tlds() {
 	// Use the IANA list: https://data.iana.org/TLD/tlds-alpha-by-domain.txt
@@ -160,6 +199,15 @@ std::set<std::string> get_valid_tlds() {
 	}
 
 	return tlds_out;
+}
+
+std::string remove_all(std::string input, char to_remove) {
+	std::string::const_iterator new_end = std::remove_if (
+		input.begin(), input.end(), [to_remove](char & x) {
+			return x == to_remove;});
+	input.resize(new_end - input.begin());
+
+	return input;
 }
 
 // Global variable, fix later once I wrap this up in a class. TODO
@@ -197,7 +245,8 @@ std::vector<std::string> extract_uris_text(const std::vector<char> & contents_by
 		// Modified so that stuff like index.html#foo matches the whole thing,
 		// and so that underscore is allowed in the netloc. It produces a lot
 		// of false positives and so the results need serious filtering.
-		R"((?:https?://?|ftp://?|gopher://?|telnet://?|ssh://?)?(?:(?:www\.)?(?:[\da-z\.-_]+)\.(?:[a-z]{2,6})|(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)|(?:(?:[0-9a-fA-F]{1,4}:){7,7}[0-9a-fA-F]{1,4}|(?:[0-9a-fA-F]{1,4}:){1,7}:|(?:[0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|(?:[0-9a-fA-F]{1,4}:){1,5}(?::[0-9a-fA-F]{1,4}){1,2}|(?:[0-9a-fA-F]{1,4}:){1,4}(?::[0-9a-fA-F]{1,4}){1,3}|(?:[0-9a-fA-F]{1,4}:){1,3}(?::[0-9a-fA-F]{1,4}){1,4}|(?:[0-9a-fA-F]{1,4}:){1,2}(?::[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:(?:(?::[0-9a-fA-F]{1,4}){1,6})|:(?:(?::[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(?::[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}|::(?:ffff(?::0{1,4}){0,1}:){0,1}(?:(?:25[0-5]|(?:2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(?:25[0-5]|(?:2[0-4]|1{0,1}[0-9]){0,1}[0-9])|(?:[0-9a-fA-F]{1,4}:){1,4}:(?:(?:25[0-5]|(?:2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(?:25[0-5]|(?:2[0-4]|1{0,1}[0-9]){0,1}[0-9])))(?::[0-9]{1,4}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])?(?:/[\w\.-]*)*(/|#\w+)?)"
+		// TODO: Apparently doesn't work? Fix. DONE, I think
+		R"(((?:https?://?|ftp://?|gopher://?|telnet://?|ssh://?)?(?:(?:www\.)?(?:[\da-z\.-_]+)\.(?:[a-z]{2,6})|(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)|(?:(?:[0-9a-fA-F]{1,4}:){7,7}[0-9a-fA-F]{1,4}|(?:[0-9a-fA-F]{1,4}:){1,7}:|(?:[0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|(?:[0-9a-fA-F]{1,4}:){1,5}(?::[0-9a-fA-F]{1,4}){1,2}|(?:[0-9a-fA-F]{1,4}:){1,4}(?::[0-9a-fA-F]{1,4}){1,3}|(?:[0-9a-fA-F]{1,4}:){1,3}(?::[0-9a-fA-F]{1,4}){1,4}|(?:[0-9a-fA-F]{1,4}:){1,2}(?::[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:(?:(?::[0-9a-fA-F]{1,4}){1,6})|:(?:(?::[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(?::[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}|::(?:ffff(?::0{1,4}){0,1}:){0,1}(?:(?:25[0-5]|(?:2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(?:25[0-5]|(?:2[0-4]|1{0,1}[0-9]){0,1}[0-9])|(?:[0-9a-fA-F]{1,4}:){1,4}:(?:(?:25[0-5]|(?:2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(?:25[0-5]|(?:2[0-4]|1{0,1}[0-9]){0,1}[0-9])))(?::[0-9]{1,4}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])?(?:/[\w\.-]*)*(/|#\w+)?))"
 	};
 
 	// For turning the wrong number of slashes (e.g. http:////) into the right
@@ -252,9 +301,6 @@ std::vector<std::string> extract_uris_text(const std::vector<char> & contents_by
 			// some characters I've seen in test sets.
 			uri = rstrip(uri, "})'\"");
 
-			//std::cout << "[I] Match: " << uri << std::endl;
-
-			// TODO: Fix URLs with the wrong number of slashes. (See Python)
 			// TODO: find out how the ax test passes in Python. (The complex regex does it)
 			uris.insert(uri);
 		}
@@ -280,8 +326,6 @@ std::vector<std::string> extract_uris_text(const std::vector<char> & contents_by
 		valid_mail_t validator = validate_email(coerced_ascii_mail.data());
 		if (validator.success == 0) {
 			// Something's wrong.
-			// std::cout << "Validation of " << auth_or_email << " failed: " <<
-			//		validator.message << std::endl;
 			continue;
 		}
 
@@ -300,7 +344,82 @@ std::vector<std::string> extract_uris_text(const std::vector<char> & contents_by
 		uris.insert("mailto:" + auth_or_email);
 	}
 
-	// TODO: Handle complex URLs (RE 3). This needs something like urllib.parse
+	// Handle complex URLs (RE 3). These need additional checks because there
+	// are so many false positives.
+	for (std::string approx_url: all_matches.matches[3]) {
+		if (strip_tags) {
+			approx_url = split_any(approx_url, "#")[0];
+		}
+
+		// Fix single slash or multi-slash URLs
+		if ((contains(approx_url, ":/") && !contains(approx_url, "://")) ||
+			contains(approx_url, ":///")){
+			RE2::Replace(&approx_url, slash_fix, R"(\1://)");
+		}
+
+		// Try to parse the URL using CxxUrl.
+		Url url;
+		std::string rerendered_url; // required because url is lazy
+
+		try {
+			url = Url(approx_url);
+			rerendered_url = url.str(); // will trigger exception if corrupt
+		} catch (Url::parse_error & e) {
+			try {
+				// If we failed to parse directly, the URL might be polluted
+				// with [] that's being misinterpreted as an invalid IPv6
+				// address. Strip those and try again.
+				approx_url = remove_all(remove_all(approx_url, '['), ']');
+				url = Url(approx_url);
+				rerendered_url = url.str();
+			} catch (Url::parse_error & e2) {
+				continue;
+			}
+		}
+
+		// If there's no scheme, add our default scheme to the url (or
+		// add mailto if it's a mail address).
+
+		if (url.scheme() == "") {
+			// If the URL contains both @ and :, it's probably a
+			// user:password@example.com type URL, not an email.
+			if (contains(rerendered_url, "@") &&
+				!contains(rerendered_url, ":")) {
+				url.scheme("mailto");
+			} else {
+				// Appens the default scheme and :// because CxxUrl can't distinguish
+				// "www.example.com/foo" as a relative path from as a URL without
+				// a scheme. We assume the latter.
+				approx_url = default_scheme + "://" + rerendered_url;
+				// This might have caused too many slashes; fix if so.
+				RE2::Replace(&approx_url, slash_fix, R"(\1://)");
+				url = approx_url;
+				rerendered_url = url.str();
+			}
+
+			rerendered_url = url.str();
+		}
+
+		// Now check the hostname for a valid TLD.
+		// If it's got an invalid tld, skip
+		std::string host = url.host();
+		// CxxUrl sets path to the whole mail address if it's a mailto,
+		// so if the host is empty, try using that.
+		if (host.empty()) { host = url.path(); }
+		std::string tld = *split_any(host, ".").rbegin();
+		bool numeric = !tld.empty() && std::all_of(
+			tld.begin(), tld.end(), isdigit);
+
+		if (!numeric && tld != "" &&
+			global_tlds.find(lower(tld)) == global_tlds.end()) {
+			continue;
+		}
+
+		rerendered_url = lstrip(rerendered_url, "({");
+		rerendered_url = rstrip(rerendered_url, "})'\"");
+
+		uris.insert(rerendered_url);
+	}
 
 	// Handle DOS paths, e.g. C:/FOO/BAR.
 	// We use slash as the directory delimiter even though DOS uses
@@ -321,21 +440,18 @@ std::vector<std::string> extract_uris_text(const std::vector<char> & contents_by
 		re2::StringPiece input(content_chunks[i]);
 		std::string match;
 
-		//std::cout << content_chunks[i] << std::endl;
-
 		while (re2::RE2::FindAndConsume(&input, dos_matcher, &match)) {
 			uris.insert("file://" + match);
 		}
 	}
 
-/*	while (re2::RE2::PartialMatch(re2::StringPiece("alfa@beta.com"), mail_auth_regex, &match)) {
-		std::cout << "Hm." << std::endl;
-	}*/
-
 	// Dump the set to a vector and sort it: we used a set earlier so that we'll
 	// only return unique URLs, and it's a good idea to make the data presentable.
+	// Only copy valid URLs.
 
-	std::vector<std::string> returned_uris(uris.begin(), uris.end());
+	std::vector<std::string> returned_uris;
+	std::copy_if(uris.begin(), uris.end(), std::back_inserter(returned_uris),
+		has_valid_netloc);
 	std::sort(returned_uris.begin(), returned_uris.end());
 
 	return returned_uris;
