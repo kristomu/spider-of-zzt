@@ -48,8 +48,24 @@ std::string get_magic(const std::vector<char> & contents_bytes, int type) {
 	magic_load(magic, NULL);
 
 	// Only looking at 1K max gives us a pretty substantial speed increase.
-	std::string magic_type = magic_buffer(magic, contents_bytes.data(),
+	const char * magic_type_chr = magic_buffer(magic, contents_bytes.data(),
 		std::min(contents_bytes.size(), (size_t)1024));
+	std::string magic_type;
+
+	if (magic_type_chr) {
+		magic_type = magic_type_chr;
+	} else {
+		// Libmagic returned an error. Throw an appropriate exception (note that
+		// there's a bug in libmagic that may make the error string NULL even if
+		// an error was reported.)
+		std::string error_msg;
+		if (magic_error(magic)) {
+			error_msg = magic_error(magic);
+		} else {
+			error_msg = "Known bug in libmagic";
+		}
+		throw std::logic_error("Libmagic: " + error_msg);
+	}
 
 	magic_close(magic);
 
@@ -57,11 +73,21 @@ std::string get_magic(const std::vector<char> & contents_bytes, int type) {
 }
 
 std::string get_magic_mimetype(const std::vector<char> & contents_bytes) {
-	return get_magic(contents_bytes, MAGIC_MIME_TYPE);
+	try {
+		return get_magic(contents_bytes, MAGIC_MIME_TYPE);
+	} catch (std::logic_error & e) {
+		std::cerr << "ERROR: " << e.what() << std::endl;
+		return "application/unknown";
+	}
 }
 
 std::string get_magic_encoding(const std::vector<char> & contents_bytes) {
-	return get_magic(contents_bytes, MAGIC_MIME_ENCODING);
+	try {
+		return get_magic(contents_bytes, MAGIC_MIME_ENCODING);
+	} catch (std::logic_error & e) {
+		std::cerr << "ERROR: " << e.what() << std::endl;
+		return "application/unknown";
+	}
 }
 
 std::vector<char> substr(const std::vector<char> & str, int start, int end) {
