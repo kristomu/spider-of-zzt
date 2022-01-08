@@ -3,6 +3,9 @@
 #include <netdb.h>
 #include <arpa/inet.h>
 
+// A class for a host (hostname string) along with its IP address, either found
+// by parsing the IP address or by looking up a domain name.
+
 // Should this contain a port so that each thread only accesses a particular
 // host:port combination? I don't think that's necessary so far...
 class resolved_host {

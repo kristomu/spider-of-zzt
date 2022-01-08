@@ -11,7 +11,7 @@
 #include <netdb.h>
 #include <arpa/inet.h>
 
-#include "resolved_host.h"
+#include "../resolved_host.h"
 
 // For keeping a record of a lookup failure.
 class lookup_failure {

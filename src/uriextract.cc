@@ -20,6 +20,8 @@
 #include "libvldmail/vldmail.h"
 #include "cxxurl/url.hpp"
 
+#include "resolved_host.h"
+
 // For testing purposes.
 
 std::vector<char> byte_seq(const char * what, int length) {
@@ -146,49 +148,16 @@ bool contains(const std::string & haystack, const std::string & needle) {
 	return (haystack.find(needle) != std::string::npos);
 }
 
-// https://stackoverflow.com/a/1323374
-bool valid_netloc_char(char x) {
-	std::string special_chars = "@-_.:[]";
-
-	return (x >= 'A' && x <= 'Z') || (x >= 'a' && x <= 'z') ||
-		(x >= '0' && x <= '9') ||
-		(special_chars.find_first_of(x) != std::string::npos);
-}
-
-bool has_valid_netloc(const std::string & url_str) {
-	try {
-		Url url(url_str);
-		if (contains(url.host(), "..")) {
-			return false;
-		}
-		for (char x: url.host()) {
-			if (!valid_netloc_char(x)) {
-				return false;
-			}
-		}
-		return true;
-	} catch (Url::parse_error & err) {
-		// Handle known false positive errors:
-		//	- file:// says port is wrong
-		//	- mailto: URIs with IP address says path is wrong
-		// It is known to handle http and https well.
-
-		// This is ugly...
-		std::string manual_schema = split_any(url_str, ":")[0];
-		if (manual_schema == "https" || manual_schema == "http") {
-			return false;
-		}
-
-		return contains(err.what(), "Path") || contains(err.what(), "Port");
-	}
-}
-
 // To reduce false positives, we need a list of valid TLDs.
 std::set<std::string> get_valid_tlds() {
 	// Use the IANA list: https://data.iana.org/TLD/tlds-alpha-by-domain.txt
 	std::ifstream tlds("tlds-alpha-by-domain.txt");
 	std::set<std::string> tlds_out;
 	std::string tld;
+
+	if (!tlds.is_open()) {
+		throw std::runtime_error("uriextract: Error opening valid TLD list!");
+	}
 
 	while(std::getline(tlds, tld)) {
 		tld = lower(tld);
@@ -212,6 +181,102 @@ std::string remove_all(std::string input, char to_remove) {
 
 // Global variable, fix later once I wrap this up in a class. TODO
 std::set<std::string> global_tlds = get_valid_tlds();
+std::set<std::string> known_schemes = {
+	"https", "http", "ftp", "aol", "gopher", "telnet", "ssh", "irc",
+	"file", "mailto", "aim", "tel", "sms", "javascript", "rdf", "news",
+	"icq"};
+
+bool has_valid_tld(const Url & url) {
+	// TODO: Use the proper numeric IP check from resolved_host.
+	// Returns true if the host is valid, false otherwise.
+	std::string host = url.host();
+	// CxxUrl sets path to the whole mail address if it's a mailto,
+	// so if the host is empty, try using that.
+	if (host.empty()) { host = url.path(); }
+	std::string tld = *split_any(host, ".").rbegin();
+	bool numeric = !tld.empty() && std::all_of(
+		tld.begin(), tld.end(), isdigit);
+
+	// If we have a numeric IP, check if it's actually an IP address.
+	if (numeric) {
+		resolved_host ip;
+		numeric = ip.update_with_ip(host);
+	}
+
+	if (numeric) { return true; }
+
+	// If the host begins in a period, it's not valid. Nor is it
+	// valid if there's no period at all (may cause false negatives
+	// for intranet sites). Empty hosts are de facto invalid (not even
+	// lynx supports them).
+	bool valid_name = !host.empty() &&
+		host[0] != '.' &&
+		contains(host, ".") &&
+		global_tlds.find(lower(tld)) != global_tlds.end();
+
+	return numeric || tld == "" || valid_name;
+}
+
+// https://stackoverflow.com/a/1323374
+bool valid_netloc_char(char x) {
+	std::string special_chars = "@-_.:[]";
+
+	return (x >= 'A' && x <= 'Z') || (x >= 'a' && x <= 'z') ||
+		(x >= '0' && x <= '9') ||
+		(special_chars.find_first_of(x) != std::string::npos);
+}
+
+// Returns true if the CxxUrl exception is a known false positive:
+//	- mailto: URIs with IP address says path is wrong
+bool cxxurl_false_positive(const Url::parse_error & err,
+	const std::string & url_str) {
+
+	// This is ugly...
+	std::string manual_scheme = split_any(url_str, ":")[0];
+
+	// If it's a URL scheme that our general expression explicitly
+	// detects, then it's not a false positive (because mailto is
+	// not part of that expression).
+	return lower(manual_scheme) == "mailto" &&
+		contains(err.what(), "Path");
+}
+
+bool has_valid_netloc(const std::string & url_str) {
+	re2:RE2 urls_with_hosts(R"((?i)((https?|ftp|gopher|telnet|ssh|irc):))");
+
+	try {
+		Url url(url_str);
+
+		// If it's a URL that should have a host but doesn't, return false.
+		if (re2::RE2::PartialMatch(url_str, urls_with_hosts)) {
+			if (url.host() == "") {
+				return false;
+			}
+
+			// If it has a host, check this host against either having a
+			// valid TLD or being a valid IP. NOTE: This may falsely
+			// discard intranet addresses (e.g. http://fserver1/).
+			if (!has_valid_tld(url)) { return false; }
+		}
+
+		// If it's a mailto without a path, return false.
+		if (url.scheme() == "mailto" && url.path() == "") {
+			return false;
+		}
+
+		if (contains(url.host(), "..")) {
+			return false;
+		}
+		for (char x: url.host()) {
+			if (!valid_netloc_char(x)) {
+				return false;
+			}
+		}
+		return true;
+	} catch (Url::parse_error & err) {
+		return cxxurl_false_positive(err, url_str);
+	}
+}
 
 std::vector<std::string> extract_uris_text(const std::vector<char> & contents_bytes,
 	bool strip_tags, std::string default_scheme) {
@@ -232,26 +297,27 @@ std::vector<std::string> extract_uris_text(const std::vector<char> & contents_by
 
 	std::vector<std::string> uri_regexes = {
 		// This regex detects URIs with :// in them without much validation
-		R"((?i)((https?|ftp|aol|gopher|telnet|ssh):/\S+))",
+		R"((?i)((https?|ftp|aol|gopher|telnet|ssh|irc|file):/\S+))",
 		// This regex detects mail, javascript, etc URIs without : or validation.
-		R"((?i)((mailto:|aim:|tel:|sms:|javascript:|rdf:|news:)\S+))",
+		R"((?i)((mailto:|mail:|aim:|tel:|sms:|javascript:|rdf:|news:|icq:)\S+))",
 		// The regex detects mail addresses without a mailto. It's from a comment
 		// on https://stackoverflow.com/a/41798661.
-		// Modified to allow for + in the username part of the address, and [] for IP
-		// addresses; and hacked to add : to also handle raw authenticated URLs.
-		R"(([\w+\.-:]+@[\w\[+\.-]+(?:\.[\w\]]+)+))",
+		// Modified to allow for + in the username part of the address, [] for IP
+		// addresses and multiple consecutive @s for common mistyped addresses;
+		// and hacked to add : to also handle raw authenticated URLs.
+		R"(([\w+\.-:]+@+[\w\[+\.-]+(?:\.[\w\]]+)+))",
 		// A more general URL matcher, even without the protocol.
 		// From https://stackoverflow.com/a/50790119
 		// Modified so that stuff like index.html#foo matches the whole thing,
 		// and so that underscore is allowed in the netloc. It produces a lot
 		// of false positives and so the results need serious filtering.
 		// TODO: Apparently doesn't work? Fix. DONE, I think
-		R"(((?:https?://?|ftp://?|gopher://?|telnet://?|ssh://?)?(?:(?:www\.)?(?:[\da-z\.-_]+)\.(?:[a-z]{2,6})|(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)|(?:(?:[0-9a-fA-F]{1,4}:){7,7}[0-9a-fA-F]{1,4}|(?:[0-9a-fA-F]{1,4}:){1,7}:|(?:[0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|(?:[0-9a-fA-F]{1,4}:){1,5}(?::[0-9a-fA-F]{1,4}){1,2}|(?:[0-9a-fA-F]{1,4}:){1,4}(?::[0-9a-fA-F]{1,4}){1,3}|(?:[0-9a-fA-F]{1,4}:){1,3}(?::[0-9a-fA-F]{1,4}){1,4}|(?:[0-9a-fA-F]{1,4}:){1,2}(?::[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:(?:(?::[0-9a-fA-F]{1,4}){1,6})|:(?:(?::[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(?::[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}|::(?:ffff(?::0{1,4}){0,1}:){0,1}(?:(?:25[0-5]|(?:2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(?:25[0-5]|(?:2[0-4]|1{0,1}[0-9]){0,1}[0-9])|(?:[0-9a-fA-F]{1,4}:){1,4}:(?:(?:25[0-5]|(?:2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(?:25[0-5]|(?:2[0-4]|1{0,1}[0-9]){0,1}[0-9])))(?::[0-9]{1,4}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])?(?:/[\w\.-]*)*(/|#\w+)?))"
+		R"(((?:https?://?|ftp://?|gopher://?|telnet://?|ssh://|irc://?)?(?:(?:www\.)?(?:[\da-z\.-_]+)\.(?:[a-z]{2,6})|(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)|(?:(?:[0-9a-fA-F]{1,4}:){7,7}[0-9a-fA-F]{1,4}|(?:[0-9a-fA-F]{1,4}:){1,7}:|(?:[0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|(?:[0-9a-fA-F]{1,4}:){1,5}(?::[0-9a-fA-F]{1,4}){1,2}|(?:[0-9a-fA-F]{1,4}:){1,4}(?::[0-9a-fA-F]{1,4}){1,3}|(?:[0-9a-fA-F]{1,4}:){1,3}(?::[0-9a-fA-F]{1,4}){1,4}|(?:[0-9a-fA-F]{1,4}:){1,2}(?::[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:(?:(?::[0-9a-fA-F]{1,4}){1,6})|:(?:(?::[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(?::[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}|::(?:ffff(?::0{1,4}){0,1}:){0,1}(?:(?:25[0-5]|(?:2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(?:25[0-5]|(?:2[0-4]|1{0,1}[0-9]){0,1}[0-9])|(?:[0-9a-fA-F]{1,4}:){1,4}:(?:(?:25[0-5]|(?:2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(?:25[0-5]|(?:2[0-4]|1{0,1}[0-9]){0,1}[0-9])))(?::[0-9]{1,4}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])?(?:/[\w\.-]*)*(/|#\w+)?))"
 	};
 
 	// For turning the wrong number of slashes (e.g. http:////) into the right
 	// number.
-	re2::RE2 slash_fix(R"((https?|ftp|aol|gopher|telnet|ssh):/+)");
+	re2::RE2 slash_fix(R"((https?|ftp|aol|gopher|telnet|ssh|irc):/+)");
 
 	std::string contents_str(contents_bytes.begin(), contents_bytes.end());
 
@@ -263,7 +329,7 @@ std::vector<std::string> extract_uris_text(const std::vector<char> & contents_by
 	// first, to reduce the complexity of the regex matching engine, and second,
 	// to extract links from surrounding cruft (e.g. quotes of a href tag).
 
-	std::vector<std::string> content_chunks = split_any(contents_str, "><{} \"");
+	std::vector<std::string> content_chunks = split_any(contents_str, "><{} \"\n");
 
 	// Performance: remove everything that doesn't contain : or .
 	std::vector<std::string>::const_iterator new_end = std::remove_if (
@@ -276,7 +342,7 @@ std::vector<std::string> extract_uris_text(const std::vector<char> & contents_by
 	std::set<std::string> uris;
 	size_t i;
 
-	// Handle simple :// and mailto URIs (without validation). (REs 0 and 1)
+	// Handle simple :// and mailto URIs (without much validation). (REs 0 and 1)
 	for (i = 0; i < 2; ++i) {
 		for (std::string match: all_matches.matches[i]) {
 			std::string uri;
@@ -301,7 +367,18 @@ std::vector<std::string> extract_uris_text(const std::vector<char> & contents_by
 			// some characters I've seen in test sets.
 			uri = rstrip(uri, "})'\"");
 
-			// TODO: find out how the ax test passes in Python. (The complex regex does it)
+			// Standardize DOS/Windows file:// URLs to be file:///path
+			// if they don't have a hostname already.
+			try {
+				Url url(uri);
+				std::string x = url.host();
+			} catch (Url::parse_error & e) {
+				RE2::Replace(&uri, "(?i)(file://)", "file:///");
+			}
+
+			// Change mail: to mailto:
+			RE2::Replace(&uri, "(?i)(^mail:)", "mailto:");
+
 			uris.insert(uri);
 		}
 	}
@@ -312,10 +389,13 @@ std::vector<std::string> extract_uris_text(const std::vector<char> & contents_by
 
 		// It's probably an authenticated URL and the @ we picked up is
 		// the username:password@host bit
-		if (contains(username_part, ":")) {
+		if (contains(username_part, ":") && !contains(username_part, "mailto:")) {
 			uris.insert(default_scheme + "://" + auth_or_email);
 			continue;
 		}
+
+		// Collapse consecutive @ marks (happens sometimes, e.g. foo@@bar.com)
+		RE2::Replace(&auth_or_email, "(@+)", "@");
 
 		// Now check if it's actually a valid mail address. If not,
 		// get outta here.
@@ -331,13 +411,18 @@ std::vector<std::string> extract_uris_text(const std::vector<char> & contents_by
 
 		// Check the TLD if the mail address has a hostname (not an IP
 		// address).
-		if (!contains(auth_or_email, "[")) {
+		if (!contains(auth_or_email, "[") && !contains(auth_or_email, "]")) {
 			std::string tld = *split_any(auth_or_email, ".").rbegin(); // last entry
 
 			// If it's got an invalid tld, skip
 			if (global_tlds.find(lower(tld)) == global_tlds.end()) {
 				continue;
 			}
+		}
+
+		// If it contains only one of [ and ], it's also invalid.
+		if (contains(auth_or_email, "[") ^ contains(auth_or_email, "]")) {
+			continue;
 		}
 
 		// It's a mail address; add it with mailto:
@@ -375,45 +460,62 @@ std::vector<std::string> extract_uris_text(const std::vector<char> & contents_by
 			} catch (Url::parse_error & e2) {
 				continue;
 			}
+		} catch (Url::build_error & e) {
+			continue;
 		}
 
-		// If there's no scheme, add our default scheme to the url (or
-		// add mailto if it's a mail address).
+		// If we don't see any of the schemes that we know about, go ahead
+		// and add one: either the default scheme or mailto depending on
+		/// whether it's a mail address. This can't be just the schemes
+		// that this regex matches, because it may be falsely matching
+		// something that contains a URL of some other scheme (e.g. mailto)
 
-		if (url.scheme() == "") {
-			// If the URL contains both @ and :, it's probably a
+		if (known_schemes.find(lower(url.scheme())) == known_schemes.end()) {
+			// If the URL contains both @ and : it's probably a
 			// user:password@example.com type URL, not an email.
 			if (contains(rerendered_url, "@") &&
 				!contains(rerendered_url, ":")) {
+
+				// If the first char is @, it's probably not a valid
+				// email.
+				if (rerendered_url[0] == '@') { continue; }
+
 				url.scheme("mailto");
+
+				// Check for validity (ew, cut and paste...)
+				std::wstring coerced_ascii_mail(rerendered_url.begin(),
+					rerendered_url.end());
+
+				valid_mail_t validator = validate_email(coerced_ascii_mail.data());
+				if (validator.success == 0) {
+					continue;
+				}
 			} else {
 				// Appens the default scheme and :// because CxxUrl can't distinguish
 				// "www.example.com/foo" as a relative path from as a URL without
 				// a scheme. We assume the latter.
 				approx_url = default_scheme + "://" + rerendered_url;
 				// This might have caused too many slashes; fix if so.
+				// TODO: file://
 				RE2::Replace(&approx_url, slash_fix, R"(\1://)");
 				url = approx_url;
-				rerendered_url = url.str();
 			}
 
-			rerendered_url = url.str();
+			try {
+				rerendered_url = url.str();
+			} catch (Url::parse_error & e) {
+				// If one of CxxUrl's false positives happen, just
+				// use approx_url.
+				if (cxxurl_false_positive(e, approx_url)) {
+					uris.insert(approx_url);
+				}
+				continue;
+			}
 		}
 
 		// Now check the hostname for a valid TLD.
 		// If it's got an invalid tld, skip
-		std::string host = url.host();
-		// CxxUrl sets path to the whole mail address if it's a mailto,
-		// so if the host is empty, try using that.
-		if (host.empty()) { host = url.path(); }
-		std::string tld = *split_any(host, ".").rbegin();
-		bool numeric = !tld.empty() && std::all_of(
-			tld.begin(), tld.end(), isdigit);
-
-		if (!numeric && tld != "" &&
-			global_tlds.find(lower(tld)) == global_tlds.end()) {
-			continue;
-		}
+		if (!has_valid_tld(url)) { continue; }
 
 		rerendered_url = lstrip(rerendered_url, "({");
 		rerendered_url = rstrip(rerendered_url, "})'\"");
@@ -441,7 +543,7 @@ std::vector<std::string> extract_uris_text(const std::vector<char> & contents_by
 		std::string match;
 
 		while (re2::RE2::FindAndConsume(&input, dos_matcher, &match)) {
-			uris.insert("file://" + match);
+			uris.insert("file:///" + match);
 		}
 	}
 
@@ -468,22 +570,23 @@ bool perform_test(const std::vector<std::string> & observed,
 	const std::vector<std::string> & unwanted) {
 
 	std::set<std::string> observed_set(observed.begin(), observed.end());
+	bool success = true;
 
 	for (std::string expected_str: expected) {
 		if (observed_set.find(expected_str) == observed_set.end()) {
 			std::cout << "Test fail: " << expected_str << " not found." << std::endl;
-			//return false;
+			success = false;
 		}
 	}
 
 	for (std::string unwanted_str: unwanted) {
 		if (observed_set.find(unwanted_str) != observed_set.end()) {
 			std::cout << "Test fail: " << unwanted_str << " found." << std::endl;
-			//return false;
+			success = false;
 		}
 	}
 
-	return true;
+	return success;
 }
 
 bool TEST_extract_uris_text() {
@@ -502,10 +605,13 @@ bool TEST_extract_uris_text() {
 	// Massive test set from Python. TODO: Split up and use a proper test
 	// framework (probably googletest).
 
+	// Stuff I've commented out relates to functionality I'd like to implement
+	// but haven't done yet.
+
 	std::vector<char> testset = vec(
 		"la de da http://www.aol.com/ http://www.aim.com/test#hello "
 		"mailto:hello@whoever.com aol://5863:126/mB:206090 durr men.da skjer "
-		"jo dette http://www.aol.com/http://foo.bar.baz ftp://existing "
+		"jo dette http://www.aol.com/http://foo.bar.baz ftp://existing.com "
 		"http://hello@whoever.com somethinghttp://example.com tel:+18005557631 "
 		"something.or.other.dk/something/wherever <a href=\"http://www2.test.com/\"> "
 		"<a href=\"https://www3.test.com/i#foo\"> present.dk "
@@ -522,27 +628,44 @@ bool TEST_extract_uris_text() {
 		"x];inst.select https://example.com/bx.html). //www.basehtml.com/foo.html "
 		"c:/PathOne/NAME C:\\PathTwo\\NAME ftp://user1:password@example.com "
 		"user:password@example.com http://example.com/page.htm\",\"id\":\"4\" "
-		"http://[^/.]/.mydomain.com www.somewhere.com/xy:/not_this");
+		"http://[^/.]/.mydomain.com www.somewhere.com/xy:/not_this "
+		"/2g0http://example.com/expected2 7?;.hot. ftp:// "
+		"https://..../..fc https:?.xy http://mixed.name.and.ip.1/ "
+		"ftp://ftp.example.com:/"
+		//"ftp://www.example.com/split\n/by/newline "
+		"http://musicknight. http://www.Halftrack "
+		"http://www.sounddogs.comTCOP .05:@A90.6DIFCHH/ "
+		"http://www.example.com:nonnumericport/ "
+		"mailto:?@q.fe example@aol.com. (us.undernet.org:6667) "
+		"http://com/ http://.com/ @example.com a@b.....com "
+		"foo@bar[.com foo@bar].com bar@@example.com "
+		"aim:leethaxor icq:1234567 file://c:/example.exe "
+		"file://localhost/etc/passwd mail:almost_mailto@example.com "
+		"=mailto:gratia@example.com 'mailto:gratia2@example.com'");
 
 	std::vector<std::string> expected = {
 		"http://www.aol.com/", "http://www.aim.com/test#hello",
 		"mailto:hello@whoever.com", "aol://5863:126/mB:206090",
-		"http://www.aol.com/http://foo.bar.baz", "ftp://existing",
+		"http://www.aol.com/http://foo.bar.baz", "ftp://existing.com",
 		"http://hello@whoever.com", "http://example.com",
 		"tel:+18005557631", "https://something.or.other.dk/something/wherever",
 		"http://www2.test.com/", "https://www3.test.com/i#foo",
 		"https://present.dk", "https://192.168.0.1/index.html",
 		"mailto:allowed@example.dk", "mailto:allowed@EXAMPLE.DK",
-		"mailto:allowed@[192.168.0.1]", "HTTP://WWW.AOL.COM/",
-		"hTTp://www.aim.com", "http://www.stripreturns.com/",
+		"mailto:allowed@[192.168.0.1]", "http://www.aol.com/",
+		"http://www.aim.com", "http://www.stripreturns.com/",
 		"http://enclosed_a.com", "http://enclosed_b.com", "http://enclosed_c.com",
 		"ftp://ftp.example.com", "ssh://ssh.example.com", "http://backslash.com",
 		"http://missed.one.com", "http://www.slashes.com",
 		"http://foo_bar.tripod.com/test.html", "http://example.com/ax.html",
 		"https://example.com/bx.html", "https://www.basehtml.com/foo.html",
-		"file://c:/PathOne/NAME", "file://C:/PathTwo/NAME",
+		"file:///c:/PathOne/NAME", "file:///C:/PathTwo/NAME",
 		"ftp://user1:password@example.com", "https://user:password@example.com",
-		"http://example.com/page.htm"};
+		"http://example.com/page.htm", "http://example.com/expected2",
+		//"ftp://ftp.example.com/", "ftp://www.example.com/split/by/newline",
+		"mailto:example@aol.com", "mailto:bar@example.com",
+		"aim:leethaxor", "icq:1234567", "file:///c:/example.exe",
+		"file://localhost/etc/passwd", "mailto:almost_mailto@example.com"};
 
 	std::vector<std::string> unwanted = {
 		"https://ubiquit.ous", "https://menda.cious", "https://poly.glottal",
@@ -554,7 +677,16 @@ bool TEST_extract_uris_text() {
 		"http://.*looksmart.com//.*[/?/&]key=([a-zA-Z0-9_/+%/-/./:",
 		"https://.tripod.com/test.html", "//www.basehtml.com/foo.html",
 		"https://allowed@example.dk", "http://example.com/page.htm\",\"id\":\"4",
-		"https://www.somewhere.com/xy://not_this"
+		"https://www.somewhere.com/xy://not_this", "https://..../..fc",
+		"https:?.xy", "http://mixed.name.and.ip.1/", "ftp://",
+		/*"ftp://ftp.example.com:/",*/ "http://musicknight.",
+		"http://www.Halftrack", "http://www.sounddogs.comTCOP",
+		"https://.05:@A90.6DIFCHH", "http://www.example.com:nonnumericport/",
+		"mailto:?@q.fe", "us.undernet.org:6667", "http://com/",
+		"mailto:@example.com", "http://.com/", "mailto:a@b.....com",
+		"mailto:foo@bar[.com", "mailto: foo@bar].com",
+		"https://mailto:gratia@example.com",
+		"https://mailto:gratia2@example.com"
 	};
 
 	return perform_test(extract_uris_text(testset, false),
@@ -596,7 +728,7 @@ void perftest() {
 	}
 }
 
-
+/*
 int main() {
 	if (!TEST_extract_uris_text()) {
 		std::cout << "Failed: TEST_extract_uris_text" << std::endl;
@@ -607,3 +739,4 @@ int main() {
 
 	return 0;
 }
+*/
