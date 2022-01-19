@@ -22,6 +22,8 @@
 
 #include "resolved_host.h"
 
+#include <libxml/HTMLparser.h> // HTML parsing (TODO: XML)
+
 // For testing purposes.
 
 std::vector<char> byte_seq(const char * what, int length) {
@@ -184,7 +186,7 @@ std::set<std::string> global_tlds = get_valid_tlds();
 std::set<std::string> known_schemes = {
 	"https", "http", "ftp", "aol", "gopher", "telnet", "ssh", "irc",
 	"file", "mailto", "aim", "tel", "sms", "javascript", "rdf", "news",
-	"icq"};
+	"nntp", "icq"};
 
 bool has_valid_tld(const Url & url) {
 	// TODO: Use the proper numeric IP check from resolved_host.
@@ -278,7 +280,7 @@ bool has_valid_netloc(const std::string & url_str) {
 	}
 }
 
-std::vector<std::string> extract_uris_text(const std::vector<char> & contents_bytes,
+std::vector<std::string> extract_uris_text(std::string contents_str,
 	bool strip_tags, std::string default_scheme) {
 
 	// We use five regular expressions for extracting URIs from text:
@@ -299,7 +301,7 @@ std::vector<std::string> extract_uris_text(const std::vector<char> & contents_by
 		// This regex detects URIs with :// in them without much validation
 		R"((?i)((https?|ftp|aol|gopher|telnet|ssh|irc|file):/\S+))",
 		// This regex detects mail, javascript, etc URIs without : or validation.
-		R"((?i)((mailto:|mail:|aim:|tel:|sms:|javascript:|rdf:|news:|icq:)\S+))",
+		R"((?i)((mailto:|mail:|aim:|tel:|sms:|javascript:|rdf:|news:|nntp:|icq:)\S+))",
 		// The regex detects mail addresses without a mailto. It's from a comment
 		// on https://stackoverflow.com/a/41798661.
 		// Modified to allow for + in the username part of the address, [] for IP
@@ -318,8 +320,6 @@ std::vector<std::string> extract_uris_text(const std::vector<char> & contents_by
 	// For turning the wrong number of slashes (e.g. http:////) into the right
 	// number.
 	re2::RE2 slash_fix(R"((https?|ftp|aol|gopher|telnet|ssh|irc):/+)");
-
-	std::string contents_str(contents_bytes.begin(), contents_bytes.end());
 
 	// Change \ to / for consistent DOS and Windows file:// tag handling, and for
 	// fixing some misspelled URLs (e.g. http:\\www.example.com)
@@ -559,6 +559,21 @@ std::vector<std::string> extract_uris_text(const std::vector<char> & contents_by
 	return returned_uris;
 }
 
+std::vector<std::string> extract_uris_text(const std::vector<char> &
+	contents_bytes, bool strip_tags, std::string default_scheme) {
+
+	std::string contents_str(contents_bytes.begin(), contents_bytes.end());
+
+	return extract_uris_text(contents_str,strip_tags, default_scheme);
+}
+
+std::vector<std::string> extract_uris_text(std::string contents_str,
+	bool strip_tags) {
+
+	return extract_uris_text(contents_str, strip_tags, "https");
+}
+
+
 std::vector<std::string> extract_uris_text(const std::vector<char> & contents_bytes,
 	bool strip_tags) {
 
@@ -641,7 +656,8 @@ bool TEST_extract_uris_text() {
 		"foo@bar[.com foo@bar].com bar@@example.com "
 		"aim:leethaxor icq:1234567 file://c:/example.exe "
 		"file://localhost/etc/passwd mail:almost_mailto@example.com "
-		"=mailto:gratia@example.com 'mailto:gratia2@example.com'");
+		"=mailto:gratia@example.com 'mailto:gratia2@example.com' "
+		"news:alt.games.descent nntp:alt.games.corewar");
 
 	std::vector<std::string> expected = {
 		"http://www.aol.com/", "http://www.aim.com/test#hello",
@@ -665,7 +681,8 @@ bool TEST_extract_uris_text() {
 		//"ftp://ftp.example.com/", "ftp://www.example.com/split/by/newline",
 		"mailto:example@aol.com", "mailto:bar@example.com",
 		"aim:leethaxor", "icq:1234567", "file:///c:/example.exe",
-		"file://localhost/etc/passwd", "mailto:almost_mailto@example.com"};
+		"file://localhost/etc/passwd", "mailto:almost_mailto@example.com",
+		"news:alt.games.descent", "nntp:alt.games.corewar"};
 
 	std::vector<std::string> unwanted = {
 		"https://ubiquit.ous", "https://menda.cious", "https://poly.glottal",
@@ -692,6 +709,107 @@ bool TEST_extract_uris_text() {
 	return perform_test(extract_uris_text(testset, false),
 		expected, unwanted);
 }
+
+std::vector<std::string> extract_uris_html(xmlNode * branch_root,
+	const std::string & base_url, bool strip_tags) {
+
+	xmlNode * current_node = NULL;
+	std::vector<std::string> urls;
+
+	// If there is no node here, exit.
+	if (branch_root == NULL) {
+		return urls;
+	}
+
+	// TODO: Handle tags properly
+
+	for (current_node = branch_root; current_node != NULL;
+		current_node = current_node->next) {
+
+		std::vector<std::string> urls_from_node;
+
+		// Check with tests if this returns what we want it to return..
+		if(current_node->type == XML_TEXT_NODE) {
+			urls_from_node = extract_uris_text(
+				(char *)current_node->content, true);
+		} else {
+			urls_from_node = extract_uris_html(current_node->children,
+				base_url, strip_tags);
+		}
+
+		std::copy(urls_from_node.begin(), urls_from_node.end(),
+			std::back_inserter(urls));
+	}
+
+	return urls;
+}
+
+// TODO: Perhaps move this to a class as I'm doing pretty much the same thing
+// in zzt_interesting too?
+std::vector<std::string> extract_uris_html(const std::vector<char> & contents_bytes,
+	std::string base_url_in, bool strip_tags) {
+
+	// We don't need the encoding. Since we aren't examining the
+	// links, we don't need a base URL either.
+	htmlDocPtr doc = htmlReadMemory(
+		contents_bytes.data(), contents_bytes.size(),
+		// TODO: get_magic_recording should also be shared somehow...
+		// perhaps in a document class. We'd need that anyway to centralize
+		// concerns about trusting what the server says about the file format
+		// vs what magic says, etc...
+		NULL, "ascii", //get_magic_encoding(contents_bytes).data(),
+		HTML_PARSE_RECOVER | HTML_PARSE_NOBLANKS | HTML_PARSE_NOERROR |
+		HTML_PARSE_NOWARNING | HTML_PARSE_NONET);
+
+	if (doc == NULL) {
+		// TODO: Somehow signal error. C++ exceptions are generally too
+		// slow and an adversarial server could make us produce an arbitrary
+		// amount of them...
+		return {}; // Error parsing document.
+	}
+
+	auto urls_from_doc = extract_uris_html(xmlDocGetRootElement(doc),
+		base_url_in, strip_tags);
+
+	xmlFreeDoc(doc);	// Free the document we read.
+	xmlCleanupParser();	// And free globals. (Should this be called once per,
+						// or just once at the end of the program?)
+
+	// TODO: remove duplicate entries
+	return urls_from_doc;
+}
+
+bool TEST_extract_uris_html() {
+	std::string testing = R"(
+		<META HTTP-EQUIV="Content-Type" CONTENT="text/html">
+		<META HTTP-EQUIV="refresh" CONTENT="300; http://www.example.com/redirect.html">
+		<a href="/slashdot.html">test</a>
+		<img src="beta/gamma.html">
+		<img srcset="http://www.example.com/test.png 480w">
+		<img srcset="path/foobar.png 480w">
+		Visit www.example.com if you dare.
+		<div>http://www.example.com/coolcat.html</div>is cool.
+		So is <div><a href="http://www.example.com/reallydone.html"></div>.)";
+
+	std::vector<std::string> expected = {
+		"http://www.example.com/redirect.html",
+		"http://www.test.com/slashdot.html",
+		"http://www.test.com/alphabetical/beta/gamma.html",
+		"http://www.example.com/test.png",
+		"http://www.test.com/alphabetical/path/foobar.png",
+		"https://www.example.com",
+		"http://www.example.com/coolcat.html",
+		"http://www.example.com/reallydone.html"};
+
+	std::vector<std::string> unwanted = {
+		"http://www.test.com/alphabetical/text/html"
+	};
+
+	return perform_test(extract_uris_html(std::vector<char>(
+			testing.begin(),testing.end()),
+		"http://www.test.com/alphabetical/", true), expected, unwanted);
+}
+
 
 std::vector<char> file_to_vector(std::string filename) {
 /*	if (!is_file(filename)) {

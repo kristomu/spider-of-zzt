@@ -15,6 +15,11 @@ int main(int argc, char ** argv) {
 		return -1;
 	}
 
+	if (!TEST_extract_uris_html()) {
+		std::cout << "Failed: TEST_extract_uris_html" << std::endl;
+		return -1;
+	}
+
 	if (argc < 2) {
 		std::cerr << "Usage: " << argv[0] << " [filename]" << std::endl;
 		return(-1);
