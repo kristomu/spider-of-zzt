@@ -639,6 +639,14 @@ class interest_data {
 		}
 };
 
+// Required by the Python vector indexing suite.
+bool operator==(const interest_data & lhs, const interest_data & rhs) {
+    return lhs.archive == rhs.archive &&
+		lhs.priority == rhs.priority &&
+		lhs.internal_path == rhs.internal_path &&
+		lhs.interest_type == rhs.interest_type;
+}
+
 std::vector<interest_data> data_interest_type(const std::string & file_path,
 	std::string mime_type, const std::vector<char> & contents_bytes,
 	int recursion_level);
