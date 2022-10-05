@@ -4,6 +4,8 @@ echo Thread
 g++ src/thread.cc src/slurper.cc -ladns -lcurl -lpthread -O9 -o thread -ggdb
 echo ZZT_interesting
 g++ src/zzt_interest_reader.cc -I/usr/include/libxml2/ -lxml2 -larchive -lmagic -O9 -o zzt_interesting -ggdb
+echo ZZT_interesting Python 3.9 lib
+g++ -shared -o zzt_interesting.so -fPIC src/zzt_interesting_python.cc -I/usr/include/libxml2/ -I/usr/include/python3.9/ -lboost_python39 -lxml2 -larchive -lmagic -O9
 echo uriextract
 g++ src/uriextract_reader.cc src/libvldmail/vldmail.c src/cxxurl/url.cpp src/resolved_host.cc -I/usr/include/libxml2/ -lxml2 -lre2 -o uriextract -ggdb
 echo "Done!"
