@@ -77,5 +77,6 @@ BOOST_PYTHON_MODULE(zzt_interesting) {
 		.def("interesting", &ZZTInterestChecker::interesting);
 	class_<interest_data>("InterestData")
 		.def_readonly("priority", &interest_data::priority)
+		.def_readonly("mime_type", &interest_data::mime_type)
 		.def("__str__", &interest_data::str);
 }

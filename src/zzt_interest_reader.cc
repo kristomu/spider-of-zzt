@@ -12,11 +12,11 @@ int main(int argc, char ** argv) {
 		// Skip over directories.
 		if (!is_file(argv[i])) { continue; }
 
-		//std::cerr << argv[i] << std::endl;
+		std::cerr << argv[i] << std::endl;
 		std::vector<char> data = file_to_vector(argv[i]);
 		std::vector<std::string> interests = data_interest_type(argv[i], "", data);
 		for (std::string interest: interests) {
-			std::cout << argv[i] << "\t" << interest << "\n";
+			std::cout << "Result: " << argv[i] << "\t" << interest << "\n";
 		}
 	}
 }

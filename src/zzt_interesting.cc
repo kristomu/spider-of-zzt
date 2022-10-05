@@ -76,6 +76,7 @@ std::string get_magic_mimetype(const std::vector<char> & contents_bytes) {
 	try {
 		return get_magic(contents_bytes, MAGIC_MIME_TYPE);
 	} catch (std::logic_error & e) {
+		// XXX: How should I ferry this to Python?
 		std::cerr << "ERROR: " << e.what() << std::endl;
 		return "application/unknown";
 	}
@@ -597,19 +598,17 @@ std::string data_interest_html(const std::vector<char> & contents_bytes) {
 const int PRI_KEYWORD = 1, PRI_EXTENSION = 2,
 			PRI_CONTENT = 3;
 
+// Planned PRI_UNIQUE_CONTENT = 4 - for content that we haven't seen before.
+
 class interest_data {
 	public:
 		bool archive;
 		int priority;				// higher is more important
 		std::string internal_path;	// treats archives as directories
 		std::string interest_type;
+		std::string mime_type;		// for distinguishing false positives
 
-		// Perhaps add this:
-		//std::string error;
-		// which denotes a non-fatal error that might still produce false
-		// negatives (e.g. unsupported compression method, corrupted file).
-
-		// HACK. TODO: Do an overload instead
+		// HACK. TODO: Do an overload instead (??)
 		std::string str() const {
 			std::string interest_string;
 
@@ -632,14 +631,24 @@ class interest_data {
 
 		interest_data() {}
 
-		interest_data(int priority_in, const std::string & interest_type_in) {
+		interest_data(int priority_in, const std::string & interest_type_in,
+			const std::string & mime_type_in) {
 			archive = false;
 			priority = priority_in;
 			interest_type = interest_type_in;
+			mime_type = mime_type_in;
 		}
 };
 
-// Required by the Python vector indexing suite.
+// For reporting non-fatal errors that might still produce false
+// negatives (e.g. unsupported compression method, corrupted file).
+
+class interest_error {
+	public:
+		std::string error;
+};
+
+// Required by the Python vector indexing suite for some reason.
 bool operator==(const interest_data & lhs, const interest_data & rhs) {
     return lhs.archive == rhs.archive &&
 		lhs.priority == rhs.priority &&
@@ -750,8 +759,10 @@ std::vector<interest_data> data_interest_archive(const std::string & file_path,
 				file_path.end());
 			if (str_contains(extension, { ".zzt", ".brd", ".mzx", ".mzb", ".szt",
 				".zzm", ".zzl", ".zz3"})) {
+				std::string magic_mime_type = get_magic_mimetype(unpacked_bytes);
+
 				interest_data inner_interest_data(PRI_EXTENSION,
-					"extension");
+					"extension", magic_mime_type);
 				interesting_in_file.push_back(inner_interest_data);
 			}
 		}
@@ -822,7 +833,7 @@ std::vector<interest_data> data_interest_type(const std::string & file_path,
 	// If it has the proper extension for files we can't verify the contents
 	// of, that's interesting.
 	if (str_contains(extension, { ".mzx", ".mzb", ".zz3", ".zzl", ".zzm" })) {
-		return {interest_data(PRI_EXTENSION, "extension")};
+		return {interest_data(PRI_EXTENSION, "extension", mime_type)};
 	}
 
 	std::string szt_zzt;
@@ -837,20 +848,26 @@ std::vector<interest_data> data_interest_type(const std::string & file_path,
 		szt_zzt = zzt_szt_check(contents_bytes, true);
 	}
 
-	if (szt_zzt != "") { return {interest_data(PRI_CONTENT, szt_zzt)}; }
+	if (szt_zzt != "") { return {interest_data(PRI_CONTENT, szt_zzt,
+		"application/x-zzt-world")}; }
 
 	// SZT and ZZT are sufficiently rare extensions that we flag them even if
 	// the above check doesn't trigger. This is useful for corrupted compressed
 	// data or data compressed using an unsupported method such as Implode.
 	if (str_contains(extension, std::vector<std::string>({ ".szt", ".zzt"}))) {
-		return {interest_data(PRI_EXTENSION, "extension")};
+		// Don't check what looks like images, audio files or video files.
+		if (str_contains(magic_mime_type, {"audio/", "video/", "image/"})) {
+			return {};
+		}
+		return {interest_data(PRI_EXTENSION, "extension", mime_type)};
 	}
 
 	// BRD file, always check. This is sufficiently prone to false positives
 	// that we only check with the correct extension.
 	if (str_contains(extension, ".brd")) {
 		if (is_brd(contents_bytes)) {
-			return {interest_data(PRI_CONTENT, "brd")};
+			return {interest_data(PRI_CONTENT, "brd",
+				"application/x-zzt-brd")};
 		}
 	}
 
@@ -867,7 +884,7 @@ std::vector<interest_data> data_interest_type(const std::string & file_path,
 	if (str_contains(mime_type, "html")) {
 		std::string possible_interest = data_interest_html(contents_bytes);
 		if (possible_interest != "") {
-			return { interest_data(PRI_KEYWORD, possible_interest)}; }
+			return { interest_data(PRI_KEYWORD, possible_interest, mime_type)}; }
 	}
 
 	// Stringify the contents so we can search it with data_interest_text.
@@ -879,7 +896,7 @@ std::vector<interest_data> data_interest_type(const std::string & file_path,
 		// there's no need for Unicode shenanigans (yet).
 		std::string possible_interest = data_interest_text(contents_text, true);
 		if (possible_interest != "") {
-			return {interest_data(PRI_KEYWORD, possible_interest)}; }
+			return {interest_data(PRI_KEYWORD, possible_interest, mime_type)}; }
 	}
 
 	// I think I've got all the formats libarchive supports -- except mtree and zip.uu.
@@ -934,7 +951,7 @@ std::vector<interest_data> data_interest_type(const std::string & file_path,
 	// TODO: Don't call this if we checked a text or html file.
 	std::string possible_interest = data_interest_binary_text(contents_text, true);
 	if (possible_interest != "") {
-		return { interest_data(PRI_KEYWORD, possible_interest)}; }
+		return { interest_data(PRI_KEYWORD, possible_interest, mime_type)}; }
 
 	return {};
 
