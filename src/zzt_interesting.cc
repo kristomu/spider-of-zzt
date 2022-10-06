@@ -77,8 +77,7 @@ std::string get_magic_mimetype(const std::vector<char> & contents_bytes) {
 		return get_magic(contents_bytes, MAGIC_MIME_TYPE);
 	} catch (std::logic_error & e) {
 		// XXX: How should I ferry this to Python?
-		std::cerr << "ERROR: " << e.what() << std::endl;
-		return "application/unknown";
+		return "application/x-unknown";
 	}
 }
 
@@ -86,8 +85,7 @@ std::string get_magic_encoding(const std::vector<char> & contents_bytes) {
 	try {
 		return get_magic(contents_bytes, MAGIC_MIME_ENCODING);
 	} catch (std::logic_error & e) {
-		std::cerr << "ERROR: " << e.what() << std::endl;
-		return "application/unknown";
+		return "application/x-unknown";
 	}
 }
 
@@ -596,7 +594,7 @@ std::string data_interest_html(const std::vector<char> & contents_bytes) {
 // Something like...
 
 const int PRI_KEYWORD = 1, PRI_EXTENSION = 2,
-			PRI_CONTENT = 3;
+			PRI_CONTENT = 3, PRI_ERROR = -1000;
 
 // Planned PRI_UNIQUE_CONTENT = 4 - for content that we haven't seen before.
 
@@ -608,22 +606,31 @@ class interest_data {
 		std::string interest_type;
 		std::string mime_type;		// for distinguishing false positives
 
+		// For reporting non-fatal errors that might still produce false
+		// negatives (e.g. unsupported compression method, corrupted file).
+		std::string error;
+
+		bool is_error() const { return error != ""; }
+
 		// HACK. TODO: Do an overload instead (??)
 		std::string str() const {
-			std::string interest_string;
+			std::string conclusion = interest_type;
+			if (is_error()) {
+				conclusion = " [ERR] " + error;
+			}
 
-			if (interest_type == "") {
-				return interest_string;
+			if (conclusion == "") {
+				return conclusion;
 			}
 
 			if (internal_path == "") {
-				return interest_type;
+				return "(mt: " + mime_type + ") " + conclusion;
 			}
 
 			if (archive) {
-				return "archive[" + internal_path + "]:" + interest_type;
+				return "(mt: " + mime_type + ") archive[" + internal_path + "]:" + conclusion;
 			} else {
-				return internal_path + ":" + interest_type;
+				return "(mt: " + mime_type + ") " + internal_path + ":" + conclusion;
 			}
 		}
 
@@ -640,12 +647,42 @@ class interest_data {
 		}
 };
 
-// For reporting non-fatal errors that might still produce false
-// negatives (e.g. unsupported compression method, corrupted file).
+// secondary constructor of sorts
+interest_data create_error_data(std::string error, std::string mime_type) {
+	interest_data error_out(PRI_ERROR, "", mime_type);
+	error_out.error = error;
 
-class interest_error {
+	return error_out;
+}
+
+class interest_report {
 	public:
-		std::string error;
+		std::vector<interest_data> results;
+		std::vector<interest_data> errors;
+
+		void add_entry(const interest_data & new_entry) {
+			if (new_entry.is_error()) {
+				errors.push_back(new_entry);
+			} else {
+				results.push_back(new_entry);
+			}
+		}
+
+		interest_report() {}
+		interest_report(interest_data sole_result) {
+			add_entry(sole_result);
+		}
+
+		void operator+=(const interest_report & other) {
+			std::copy(other.results.begin(), other.results.end(),
+				std::back_inserter(results));
+			std::copy(other.errors.begin(), other.errors.end(),
+				std::back_inserter(errors));
+		}
+
+		void operator+=(const interest_data & new_entry) {
+			add_entry(new_entry);
+		}
 };
 
 // Required by the Python vector indexing suite for some reason.
@@ -656,9 +693,15 @@ bool operator==(const interest_data & lhs, const interest_data & rhs) {
 		lhs.interest_type == rhs.interest_type;
 }
 
-std::vector<interest_data> data_interest_type(const std::string & file_path,
+interest_report data_interest_type(const std::string & file_path,
 	std::string mime_type, const std::vector<char> & contents_bytes,
 	int recursion_level);
+
+interest_report data_interest_type(const std::string & file_path,
+	std::string mime_type, const std::vector<char> & contents_bytes) {
+
+	return data_interest_type(file_path, mime_type, contents_bytes, 3);
+}
 
 std::string coarse_libarchive_error(int ret_val) {
 	switch(ret_val) {
@@ -673,10 +716,11 @@ std::string coarse_libarchive_error(int ret_val) {
 // Check if an archive contains interesting files. The recursion level parameter
 // stops quines and ZIP bombs from causing infinite loops.
 
-std::vector<interest_data> data_interest_archive(const std::string & file_path,
-	const std::vector<char> & contents_bytes, int recursion_level) {
+interest_report data_interest_archive(const std::string & file_path,
+	std::string mime_type, const std::vector<char> & contents_bytes,
+	int recursion_level) {
 
-	std::vector<interest_data> interesting_files;
+	interest_report interesting_files;
 
 	if (recursion_level <= 0) { return interesting_files; }
 
@@ -694,17 +738,17 @@ std::vector<interest_data> data_interest_archive(const std::string & file_path,
 	if (ret_val != ARCHIVE_OK) {
 		std::string err = archive_error_string(cur_archive);
 		archive_read_free(cur_archive);
-		throw(std::runtime_error("Error unpacking archive " + file_path + ": " +
-			err));
+		throw std::runtime_error("Error unpacking archive: " + err);
 	}
 
 	std::runtime_error inherited_exception("placeholder");
 	bool got_exception = false;
 	ret_val = ARCHIVE_OK;
 
-	std::vector<interest_data> interesting_in_file;
-
 	while (ret_val == ARCHIVE_OK || ret_val == ARCHIVE_WARN) {
+
+		interest_report interesting_in_file;
+		bool decompression_failure = false;
 
 		ret_val = archive_read_next_header(cur_archive, &entry);
 		if (ret_val != ARCHIVE_OK && ret_val != ARCHIVE_WARN) {
@@ -733,14 +777,24 @@ std::vector<interest_data> data_interest_archive(const std::string & file_path,
 		// Check if the compression method is supported. If not, clear the data
 		// array so we can still check for extensions and the likes.
 		if (bytes_read < 0) {
-			std::cerr << "xERROR: " << file_path << "\t" << archive_error_string(cur_archive) << std::endl;
+			decompression_failure = true;
+			interesting_in_file += create_error_data(
+				archive_error_string(cur_archive), "application/x-unknown");
 			unpacked_bytes.resize(0);
 			bytes_read = 0;
 		}
 
 		try {
-			interesting_in_file = data_interest_type( file_path + "/" +
-				inner_pathname, "", unpacked_bytes, recursion_level-1);
+			if (decompression_failure && bytes_read == 0) {
+				// Propagate a mime-type telling the function that we don't
+				// know what the file is because we couldn't decompress it.
+				interesting_in_file += data_interest_type( file_path + "/" +
+					inner_pathname, "application/x-unknown", unpacked_bytes,
+					recursion_level-1);
+			} else {
+				interesting_in_file += data_interest_type( file_path + "/" +
+					inner_pathname, "", unpacked_bytes, recursion_level-1);
+			}
 		} catch (const std::runtime_error & e) {
 			// If we got an exception, the rule is: if we find something else that's
 			// interesting, forget it happened; but if we don't find anything, then
@@ -754,16 +808,21 @@ std::vector<interest_data> data_interest_archive(const std::string & file_path,
 		// interest from the extension itself, as we're a bit more lenient here than
 		// with uncompressed files. (XXX: Why? I think it's because the file may
 		// be corrupted.)
-		if (interesting_in_file.empty()) {
+		if (interesting_in_file.results.empty()) {
 			std::string extension = lower(file_path.begin() + file_path.size() - 4,
 				file_path.end());
 			if (str_contains(extension, { ".zzt", ".brd", ".mzx", ".mzb", ".szt",
 				".zzm", ".zzl", ".zz3"})) {
 				std::string magic_mime_type = get_magic_mimetype(unpacked_bytes);
 
-				interest_data inner_interest_data(PRI_EXTENSION,
+				// If we got an extraction failure earlier, display an
+				// unknown mime type instead of x-empty.
+				if (decompression_failure) {
+					magic_mime_type = "application/x-unknown";
+				}
+
+				interesting_in_file += interest_data(PRI_EXTENSION,
 					"extension", magic_mime_type);
-				interesting_in_file.push_back(inner_interest_data);
 			}
 		}
 
@@ -771,7 +830,7 @@ std::vector<interest_data> data_interest_archive(const std::string & file_path,
 		// is calling us will know where the interesting files are stored. Also
 		// set the archive bit and push the interest data to interesting_files.
 
-		for (interest_data id: interesting_in_file) {
+		for (interest_data & id: interesting_in_file.results) {
 			id.archive = true;
 
 			if (id.internal_path == "") {
@@ -779,9 +838,21 @@ std::vector<interest_data> data_interest_archive(const std::string & file_path,
 			} else {
 				id.internal_path = inner_pathname + "/" + id.internal_path;
 			}
-
-			interesting_files.push_back(id);
 		}
+
+		// Writing a zip() routine just for this seems like overkill, so have some
+		// cut and paste code instead.
+		for (interest_data & id: interesting_in_file.errors) {
+			id.archive = true;
+
+			if (id.internal_path == "") {
+				id.internal_path = inner_pathname;
+			} else {
+				id.internal_path = inner_pathname + "/" + id.internal_path;
+			}
+		}
+
+		interesting_files += interesting_in_file;
 	}
 
 	if (ret_val != ARCHIVE_OK && ret_val != ARCHIVE_EOF) {
@@ -795,7 +866,9 @@ std::vector<interest_data> data_interest_archive(const std::string & file_path,
 				coarse_libarchive_error(ret_val);
 		}
 		archive_read_free(cur_archive);
-		throw (std::runtime_error(what));
+		interesting_files += create_error_data(
+			what, mime_type);
+		return interesting_files;
 	}
 
 	ret_val = archive_read_free(cur_archive);
@@ -804,7 +877,7 @@ std::vector<interest_data> data_interest_archive(const std::string & file_path,
 			archive_error_string(cur_archive)));
 	}
 
-	if (interesting_files.empty() && got_exception) {
+	if (interesting_files.results.empty() && got_exception) {
 		throw(inherited_exception);
 	}
 
@@ -817,7 +890,7 @@ std::vector<interest_data> data_interest_archive(const std::string & file_path,
 // the way it's interesting, and any potential errors. Perhaps also a bool
 // denoting whether it *is* interesting.
 
-std::vector<interest_data> data_interest_type(const std::string & file_path,
+interest_report data_interest_type(const std::string & file_path,
 	std::string mime_type, const std::vector<char> & contents_bytes,
 	int recursion_level) {
 
@@ -833,7 +906,7 @@ std::vector<interest_data> data_interest_type(const std::string & file_path,
 	// If it has the proper extension for files we can't verify the contents
 	// of, that's interesting.
 	if (str_contains(extension, { ".mzx", ".mzb", ".zz3", ".zzl", ".zzm" })) {
-		return {interest_data(PRI_EXTENSION, "extension", mime_type)};
+		return interest_data(PRI_EXTENSION, "extension", mime_type);
 	}
 
 	std::string szt_zzt;
@@ -848,8 +921,8 @@ std::vector<interest_data> data_interest_type(const std::string & file_path,
 		szt_zzt = zzt_szt_check(contents_bytes, true);
 	}
 
-	if (szt_zzt != "") { return {interest_data(PRI_CONTENT, szt_zzt,
-		"application/x-zzt-world")}; }
+	if (szt_zzt != "") { return interest_data(PRI_CONTENT, szt_zzt,
+		"application/x-zzt-world"); }
 
 	// SZT and ZZT are sufficiently rare extensions that we flag them even if
 	// the above check doesn't trigger. This is useful for corrupted compressed
@@ -859,15 +932,15 @@ std::vector<interest_data> data_interest_type(const std::string & file_path,
 		if (str_contains(magic_mime_type, {"audio/", "video/", "image/"})) {
 			return {};
 		}
-		return {interest_data(PRI_EXTENSION, "extension", mime_type)};
+		return interest_data(PRI_EXTENSION, "extension", mime_type);
 	}
 
 	// BRD file, always check. This is sufficiently prone to false positives
 	// that we only check with the correct extension.
 	if (str_contains(extension, ".brd")) {
 		if (is_brd(contents_bytes)) {
-			return {interest_data(PRI_CONTENT, "brd",
-				"application/x-zzt-brd")};
+			return interest_data(PRI_CONTENT, "brd",
+				"application/x-zzt-brd");
 		}
 	}
 
@@ -884,7 +957,7 @@ std::vector<interest_data> data_interest_type(const std::string & file_path,
 	if (str_contains(mime_type, "html")) {
 		std::string possible_interest = data_interest_html(contents_bytes);
 		if (possible_interest != "") {
-			return { interest_data(PRI_KEYWORD, possible_interest, mime_type)}; }
+			return interest_data(PRI_KEYWORD, possible_interest, mime_type); }
 	}
 
 	// Stringify the contents so we can search it with data_interest_text.
@@ -896,10 +969,13 @@ std::vector<interest_data> data_interest_type(const std::string & file_path,
 		// there's no need for Unicode shenanigans (yet).
 		std::string possible_interest = data_interest_text(contents_text, true);
 		if (possible_interest != "") {
-			return {interest_data(PRI_KEYWORD, possible_interest, mime_type)}; }
+			return interest_data(PRI_KEYWORD, possible_interest, mime_type); }
 	}
 
 	// I think I've got all the formats libarchive supports -- except mtree and zip.uu.
+	// NOTE: Apparently libarchive doesn't support .arj or .arc; I'm going to keep them
+	// here for now so that they auto-register as corrupted (and I can check them manually
+	// if need be).
 	std::vector<std::string> archive_mimetypes = {
 		"application/zip", "application/gzip", "application/x-tar", "application/x-arj",
 		"application/x-lzh-compressed", "application/x-rar", "application/x-cpio",
@@ -930,55 +1006,60 @@ std::vector<interest_data> data_interest_type(const std::string & file_path,
 		maybe_archive = str_contains(extension, possible_archive_extensions);
 	}
 
+	interest_report interesting_in_file;
+
 	if (archive || maybe_archive) {
 		try {
-			std::vector<interest_data> interesting_in_file =
-				data_interest_archive(file_path, contents_bytes,
-					recursion_level);
-			if (!interesting_in_file.empty()) {
+			interesting_in_file = data_interest_archive(
+				file_path, mime_type, contents_bytes, recursion_level);
+			if (!interesting_in_file.results.empty()) {
 				return interesting_in_file;
 			}
 		} catch (const std::runtime_error & e) {
 			// Don't signal corrupt archive file for something that's primarily not
 			// an archive.
 			if (!maybe_archive) {
-				std::cerr << "WARNING: Corrupt archive file " << file_path << ", " << e.what() << std::endl;
+				return create_error_data(std::string("Corrupt archive file: ") +
+					e.what(), mime_type);
 			}
 		}
 	}
 
 	// If all else fails, look for keywords in the binary stream.
+	// We append even though interesting_in_file may well be empty because
+	// it may also contain some errors.
 	// TODO: Don't call this if we checked a text or html file.
 	std::string possible_interest = data_interest_binary_text(contents_text, true);
 	if (possible_interest != "") {
-		return { interest_data(PRI_KEYWORD, possible_interest, mime_type)}; }
+		interesting_in_file += interest_data(PRI_KEYWORD,
+			possible_interest, mime_type); }
 
-	return {};
+	return interesting_in_file;
 
 }
 
-std::vector<std::string> data_interest_type(const std::string & file_path,
+/*std::vector<std::string> data_interest_type(const std::string & file_path,
 	const std::string & mime_type, const std::vector<char> & contents_bytes) {
 
 	std::vector<std::string> results;
 	for (const interest_data & id: data_interest_type(
-		file_path, mime_type, contents_bytes, 3)) {
+		file_path, mime_type, contents_bytes, 3).results) {
 		results.push_back(id.str());
 	}
 
 	return results;
-}
+}*/
 
 std::string highest_priority_interest_type(const std::string & file_path,
 	const std::string & mime_type, const std::vector<char> & contents_bytes) {
 
-	std::vector<interest_data> interesting_files =
+	interest_report interesting_files =
 		data_interest_type(file_path, mime_type, contents_bytes, 3);
 
 	int record_priority = INT_MIN;
 	std::string recordholder = "";
 
-	for (const interest_data & id: interesting_files) {
+	for (const interest_data & id: interesting_files.results) {
 		if (!id.interesting() || id.priority < record_priority) {
 			continue;
 		}
@@ -991,10 +1072,14 @@ std::string highest_priority_interest_type(const std::string & file_path,
 
 // --- //
 
+// WARNING: This reports errors as uninteresting even though they may be
+// evidence of a false positive (corrupt archive that would contain
+// something interesting if uncorrupted, e.g.)
 bool is_data_interesting(std::string filename, std::string mime_type,
 	const std::vector<char> & contents_bytes) {
 
-	return !data_interest_type(filename, mime_type, contents_bytes).empty();
+	return !data_interest_type(filename, mime_type, contents_bytes).
+		results.empty();
 }
 
 // TODO: Add more tests from Python

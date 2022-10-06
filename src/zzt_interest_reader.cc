@@ -14,9 +14,12 @@ int main(int argc, char ** argv) {
 
 		std::cerr << argv[i] << std::endl;
 		std::vector<char> data = file_to_vector(argv[i]);
-		std::vector<std::string> interests = data_interest_type(argv[i], "", data);
-		for (std::string interest: interests) {
-			std::cout << "Result: " << argv[i] << "\t" << interest << "\n";
+		interest_report interests = data_interest_type(argv[i], "", data);
+		for (interest_data interest: interests.results) {
+			std::cout << "Result: " << argv[i] << "\t" << interest.str() << "\n";
+		}
+		for (interest_data interest: interests.errors) {
+			std::cerr << "ERROR: " << argv[i] << "\t" << interest.str() << "\n";
 		}
 	}
 }
