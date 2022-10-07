@@ -598,6 +598,32 @@ const int PRI_KEYWORD = 1, PRI_EXTENSION = 2,
 
 // Planned PRI_UNIQUE_CONTENT = 4 - for content that we haven't seen before.
 
+// Auxiliary function for determining if something is valid UTF-8.
+// Source: http://www.zedwood.com/article/cpp-is-valid-utf8-string-function
+
+bool utf8_check_is_valid(const std::string & string)
+{
+    int c,i,ix,n,j;
+    for (i=0, ix=string.length(); i < ix; i++)
+    {
+        c = (unsigned char) string[i];
+        //if (c==0x09 || c==0x0a || c==0x0d || (0x20 <= c && c <= 0x7e) ) n = 0; // is_printable_ascii
+        if (0x00 <= c && c <= 0x7f) n=0; // 0bbbbbbb
+        else if ((c & 0xE0) == 0xC0) n=1; // 110bbbbb
+        else if ( c==0xed && i<(ix-1) && ((unsigned char)string[i+1] & 0xa0)==0xa0) return false; //U+d800 to U+dfff
+        else if ((c & 0xF0) == 0xE0) n=2; // 1110bbbb
+        else if ((c & 0xF8) == 0xF0) n=3; // 11110bbb
+        //else if (($c & 0xFC) == 0xF8) n=4; // 111110bb //byte 5, unnecessary in 4 byte UTF-8
+        //else if (($c & 0xFE) == 0xFC) n=5; // 1111110b //byte 6, unnecessary in 4 byte UTF-8
+        else return false;
+        for (j=0; j<n && i<ix; j++) { // n bytes matching 10bbbbbb follow ?
+            if ((++i == ix) || (( (unsigned char)string[i] & 0xC0) != 0x80))
+                return false;
+        }
+    }
+    return true;
+}
+
 class interest_data {
 	public:
 		bool archive;
@@ -612,11 +638,23 @@ class interest_data {
 
 		bool is_error() const { return error != ""; }
 
-		// HACK. TODO: Do an overload instead (??)
 		std::string str() const {
 			std::string conclusion = interest_type;
 			if (is_error()) {
 				conclusion = " [ERR] " + error;
+			}
+
+			// Quick and dirty HACK to deal with non-UTF8 archive
+			// names. It'd be better to just return them as bytes
+			// to python and then try to decode there: or to be
+			// more principled and do the charset decoding on a
+			// filename basis here, and return a UTF-8 string.
+			// but for now...
+			std::string sanitized_path = internal_path;
+			if (!utf8_check_is_valid(sanitized_path)) {
+				for (char & x: sanitized_path) {
+					if (x < 0) x = '_';
+				}
 			}
 
 			if (conclusion == "") {
@@ -628,9 +666,9 @@ class interest_data {
 			}
 
 			if (archive) {
-				return "(mt: " + mime_type + ") archive[" + internal_path + "]:" + conclusion;
+				return "(mt: " + mime_type + ") archive[" + sanitized_path + "]:" + conclusion;
 			} else {
-				return "(mt: " + mime_type + ") " + internal_path + ":" + conclusion;
+				return "(mt: " + mime_type + ") " + sanitized_path + ":" + conclusion;
 			}
 		}
 
