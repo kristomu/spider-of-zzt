@@ -664,6 +664,14 @@ class interest_data {
 				}
 			}
 
+			// Ditto the conclusion, as some RAR-related libarchive error
+			// messages also contain the filename.
+			if (!utf8_check_is_valid(conclusion)) {
+				for (char & x: conclusion) {
+					if (x < 0) x = '_';
+				}
+			}
+
 			if (conclusion == "") {
 				return conclusion;
 			}
