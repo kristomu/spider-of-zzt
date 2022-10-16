@@ -696,10 +696,10 @@ std::vector<char> get_sha224_raw(const std::vector<char> & contents_bytes) {
 std::string to_hex(const std::vector<char> & data) {
 	std::ostringstream parser;
 
-	parser << std::setw(2) << std::setfill('0') << std::hex;
+	parser << std::setfill('0') << std::hex;
 
-	for (size_t i = 0; i < data.size(); ++i) {
-		parser << (int)((unsigned char)data[i]);
+	for (char x: data) {
+		parser << std::setw(2) << (int)((unsigned char)x);
 	}
 
     return parser.str();
