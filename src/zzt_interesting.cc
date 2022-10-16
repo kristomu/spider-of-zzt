@@ -44,15 +44,25 @@ const int ZZT_HEADER_MAGIC = -1, SUPERZZT_HEADER_MAGIC = -2;
 
 // Determine various types of magic information: mime encoding and type.
 // Only looks at the first 1K for speed.
-std::string get_magic(const std::vector<char> & contents_bytes, int type) {
+std::string get_magic(const std::vector<char> & contents_bytes, int type,
+	bool quick) {
+
 	magic_t magic;
 
 	magic = magic_open(type);
 	magic_load(magic, NULL);
 
 	// Only looking at 1K max gives us a pretty substantial speed increase.
-	const char * magic_type_chr = magic_buffer(magic, contents_bytes.data(),
-		std::min(contents_bytes.size(), (size_t)1024));
+	// We'll do more comprehensive checks for potential positives.
+	size_t length;
+	if (quick) {
+		length = std::min(contents_bytes.size(), (size_t)1024);
+	} else {
+		length = contents_bytes.size();
+	}
+
+	const char * magic_type_chr = magic_buffer(magic,
+		contents_bytes.data(), length);
 	std::string magic_type;
 
 	if (magic_type_chr) {
@@ -77,16 +87,26 @@ std::string get_magic(const std::vector<char> & contents_bytes, int type) {
 
 std::string get_magic_mimetype(const std::vector<char> & contents_bytes) {
 	try {
-		return get_magic(contents_bytes, MAGIC_MIME_TYPE);
+		return get_magic(contents_bytes, MAGIC_MIME_TYPE, true);
 	} catch (std::logic_error & e) {
-		// XXX: How should I ferry this to Python?
 		return "application/x-unknown";
 	}
 }
 
+std::string get_comprehensive_magic_mimetype(
+	const std::vector<char> & contents_bytes) {
+
+	try {
+		return get_magic(contents_bytes, MAGIC_MIME_TYPE, false);
+	} catch (std::logic_error & e) {
+		return "application/x-unknown";
+	}
+
+}
+
 std::string get_magic_encoding(const std::vector<char> & contents_bytes) {
 	try {
-		return get_magic(contents_bytes, MAGIC_MIME_ENCODING);
+		return get_magic(contents_bytes, MAGIC_MIME_ENCODING, true);
 	} catch (std::logic_error & e) {
 		return "application/x-unknown";
 	}
@@ -298,6 +318,14 @@ std::string zzt_szt_check(const std::vector<char> & contents_bytes,
 			byte_seq("\x08" "\x00" "Creature", 10)) {
 			return "";
 		}
+		// Check for InstallShield SETUP.INS code. These files have
+		// 00 02 00 02 repeating at 0x10, which would correspond to every other
+		// key acquired with each of them being set by nonzero byte 02; not
+		// very realistic.
+		if (substr(contents_bytes, 0x10, 0x18) ==
+			byte_seq("\x00\x02\x00\x02\x00\x02\x00\x02", 8)) {
+				return "";
+		}
 	}
 
 	// Tie Fighter mission files (.TIE) have headers like this:
@@ -365,7 +393,7 @@ bool is_brd(const std::vector<char> & contents_bytes) {
 	// The first two bytes give the size of the board, which should be in the rough
 	// range of the actual length of the contents. The contents chunk could be larger
 	// if the web server appends junk to it, but it shouldn't have a size of say, zero.
-	// Then comes the length of the board title, which should be shorter than 50 bytes.
+	// Then comes the length of the board title, which should be shorter than 60 bytes.
 	// That's about it; we can't say much about the RLE structure without dragging in
 	// a whole interpreter...
 
@@ -378,9 +406,29 @@ bool is_brd(const std::vector<char> & contents_bytes) {
 
 	if (possible_header.board_size < 53 || (size_t)possible_header.board_size >
 		contents_bytes.size()*2) { return false; }
-	if (possible_header.title_length > 50 || possible_header.title_length < 0) {
+	if (possible_header.title_length > 60 || possible_header.title_length < 0) {
 		return false;
 	}
+
+	// Do a very rough RLE check because I'm getting so many false positives.
+	// The RLE format is [count] [element] [color] starting at 0x035. Element
+	// must be max 53 for ZZT and 79 for Super ZZT. So we count the number of
+	// tiles up to a total of 1500 (60x25 for ZZT), and check how many tile
+	// bytes are out of range. If there are more than 20 (arbitrary threshold)
+	// then it's not a .brd file.
+
+	int tilecount = 0;
+	int wrong_bytes_count = 0;
+	for (int i = 0x035; tilecount < 1500 & i < contents_bytes.size();
+		i += 3) {
+
+		tilecount += (int)contents_bytes[i];
+		if (contents_bytes[i+1] > 79) {
+			++wrong_bytes_count;
+		}
+	}
+
+	if (wrong_bytes_count > 20) return false;
 
 	return true;
 }
@@ -697,6 +745,14 @@ class interest_data {
 			std::string sanitized_path = internal_path;
 			if (!utf8_check_is_valid(sanitized_path)) {
 				for (char & x: sanitized_path) {
+					if (x < 0) x = '_';
+				}
+			}
+
+			// Ditto the conclusion, as some RAR-related libarchive error
+			// messages also contain the filename.
+			if (!utf8_check_is_valid(conclusion)) {
+				for (char & x: conclusion) {
 					if (x < 0) x = '_';
 				}
 			}
@@ -1030,6 +1086,18 @@ interest_report data_interest_type(const std::string & file_path,
 	// BRD file, always check. This is sufficiently prone to false positives
 	// that we only check with the correct extension.
 	if (str_contains(extension, ".brd")) {
+		// Having some trouble with false positives, so remove
+		// obvious offenders: picture files and HTML files.
+		std::vector<std::string> false_pos = {"audio/", "video/", "image/",
+				"text/html"};
+		if (str_contains(magic_mime_type, false_pos)) {
+			std::string comp_mime_type =
+				get_comprehensive_magic_mimetype(contents_bytes);
+			if (str_contains(comp_mime_type, false_pos)) {
+				return {};
+			}
+		}
+
 		if (is_brd(contents_bytes)) {
 			return interest_data(PRI_CONTENT, "brd",
 				"application/x-zzt-brd", hash);
