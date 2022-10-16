@@ -837,14 +837,17 @@ bool operator==(const interest_data & lhs, const interest_data & rhs) {
 		lhs.interest_type == rhs.interest_type;
 }
 
+// file_ok is set to false if this is called by a failing archive extraction
+// (to get extension or similar), so that we know not to set a hash.
 interest_report data_interest_type(const std::string & file_path,
 	std::string mime_type, const std::vector<char> & contents_bytes,
-	int recursion_level);
+	int recursion_level, bool file_ok);
 
 interest_report data_interest_type(const std::string & file_path,
 	std::string mime_type, const std::vector<char> & contents_bytes) {
 
-	return data_interest_type(file_path, mime_type, contents_bytes, 3);
+	return data_interest_type(file_path, mime_type, contents_bytes, 3,
+		true);
 }
 
 std::string coarse_libarchive_error(int ret_val) {
@@ -935,10 +938,11 @@ interest_report data_interest_archive(const std::string & file_path,
 				// know what the file is because we couldn't decompress it.
 				interesting_in_file += data_interest_type( file_path + "/" +
 					inner_pathname, "application/x-unknown", unpacked_bytes,
-					recursion_level-1);
+					recursion_level-1, false);
 			} else {
 				interesting_in_file += data_interest_type( file_path + "/" +
-					inner_pathname, "", unpacked_bytes, recursion_level-1);
+					inner_pathname, "", unpacked_bytes, recursion_level-1,
+					true);
 			}
 		} catch (const std::runtime_error & e) {
 			// If we got an exception, the rule is: if we find something else that's
@@ -1039,10 +1043,15 @@ interest_report data_interest_archive(const std::string & file_path,
 
 interest_report data_interest_type(const std::string & file_path,
 	std::string mime_type, const std::vector<char> & contents_bytes,
-	int recursion_level) {
+	int recursion_level, bool file_ok) {
 
 	std::string magic_mime_type = get_magic_mimetype(contents_bytes);
-	std::string hash = get_sha224(contents_bytes);
+	std::string hash;
+	if (file_ok) {
+		hash = get_sha224(contents_bytes);
+	} else {
+		hash = "???";
+	}
 
 	if (mime_type == "") {
 		mime_type = magic_mime_type;
@@ -1201,23 +1210,12 @@ interest_report data_interest_type(const std::string & file_path,
 
 }
 
-/*std::vector<std::string> data_interest_type(const std::string & file_path,
-	const std::string & mime_type, const std::vector<char> & contents_bytes) {
-
-	std::vector<std::string> results;
-	for (const interest_data & id: data_interest_type(
-		file_path, mime_type, contents_bytes, 3).results) {
-		results.push_back(id.str());
-	}
-
-	return results;
-}*/
-
 std::string highest_priority_interest_type(const std::string & file_path,
 	const std::string & mime_type, const std::vector<char> & contents_bytes) {
 
 	interest_report interesting_files =
-		data_interest_type(file_path, mime_type, contents_bytes, 3);
+		data_interest_type(file_path, mime_type, contents_bytes, 3,
+			true);
 
 	int record_priority = INT_MIN;
 	std::string recordholder = "";
