@@ -16,6 +16,8 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -24,7 +26,8 @@
 #include <archive_entry.h>	// Recursive search inside ZIP files
 #include <archive.h>		// Ditto
 
-#include <libxml/HTMLparser.h> // HTML parsing (TODO: XML)
+#include <libxml/HTMLparser.h>	// HTML parsing (TODO: XML)
+#include <openssl/sha.h>		// Hash calculations.
 
 struct zzt_header {
 	int16_t magic;
@@ -597,6 +600,7 @@ const int PRI_KEYWORD = 1, PRI_EXTENSION = 2,
 			PRI_CONTENT = 3, PRI_ERROR = -1000;
 
 // Planned PRI_UNIQUE_CONTENT = 4 - for content that we haven't seen before.
+// Or do that somewhere else???
 
 // Auxiliary function for determining if something is valid UTF-8.
 // Source: http://www.zedwood.com/article/cpp-is-valid-utf8-string-function
@@ -631,6 +635,35 @@ bool utf8_check_is_valid(const std::string & string) {
 	return true;
 }
 
+// Returns a 28 byte MSB char vector containing the SHA224 hash of the
+// contents of contents_bytes.
+std::vector<char> get_sha224_raw(const std::vector<char> & contents_bytes) {
+	// NOTE: Assumes that vectors are consecutive in memory.
+	std::vector<char> out(28);
+	SHA224((const unsigned char *)contents_bytes.data(),
+		contents_bytes.size(), (unsigned char *)out.data());
+	return out;
+}
+
+std::string to_hex(const std::vector<char> & data) {
+	std::ostringstream parser;
+
+	parser << std::setw(2) << std::setfill('0') << std::hex;
+
+	for (size_t i = 0; i < data.size(); ++i) {
+		parser << (int)((unsigned char)data[i]);
+	}
+
+    return parser.str();
+}
+
+std::string get_sha224(const std::vector<char> & contents_bytes) {
+	return to_hex(get_sha224_raw(contents_bytes));
+}
+
+// TODO: Somehow not print the hash if the file wasn't actually
+// uncompressed, instead of outputting a hash for a zero byte file.
+
 class interest_data {
 	public:
 		bool archive;
@@ -638,6 +671,10 @@ class interest_data {
 		std::string internal_path;	// treats archives as directories
 		std::string interest_type;
 		std::string mime_type;		// for distinguishing false positives
+
+		// Human-readable SHA224 hash of the file, used for filtering out
+		// known ZZT files.
+		std::string file_hash;
 
 		// For reporting non-fatal errors that might still produce false
 		// negatives (e.g. unsupported compression method, corrupted file).
@@ -668,14 +705,17 @@ class interest_data {
 				return conclusion;
 			}
 
+			std::string preamble = "(mt: " + mime_type + ", sha224: " +
+				file_hash + ") ";
+
 			if (internal_path == "") {
-				return "(mt: " + mime_type + ") " + conclusion;
+				return preamble + conclusion;
 			}
 
 			if (archive) {
-				return "(mt: " + mime_type + ") archive[" + sanitized_path + "]:" + conclusion;
+				return preamble + "archive[" + sanitized_path + "]:" + conclusion;
 			} else {
-				return "(mt: " + mime_type + ") " + sanitized_path + ":" + conclusion;
+				return preamble + sanitized_path + ":" + conclusion;
 			}
 		}
 
@@ -684,17 +724,20 @@ class interest_data {
 		interest_data() {}
 
 		interest_data(int priority_in, const std::string & interest_type_in,
-			const std::string & mime_type_in) {
+			const std::string & mime_type_in, const std::string & hash_in) {
 			archive = false;
 			priority = priority_in;
 			interest_type = interest_type_in;
 			mime_type = mime_type_in;
+			file_hash = hash_in;
 		}
 };
 
 // secondary constructor of sorts
-interest_data create_error_data(std::string error, std::string mime_type) {
-	interest_data error_out(PRI_ERROR, "", mime_type);
+interest_data create_error_data(std::string error, std::string mime_type,
+	std::string file_hash) {
+
+	interest_data error_out(PRI_ERROR, "", mime_type, file_hash);
 	error_out.error = error;
 
 	return error_out;
@@ -824,7 +867,8 @@ interest_report data_interest_archive(const std::string & file_path,
 		if (bytes_read < 0) {
 			decompression_failure = true;
 			interesting_in_file += create_error_data(
-				archive_error_string(cur_archive), "application/x-unknown");
+				archive_error_string(cur_archive), "application/x-unknown",
+				"???");
 			unpacked_bytes.resize(0);
 			bytes_read = 0;
 		}
@@ -867,7 +911,7 @@ interest_report data_interest_archive(const std::string & file_path,
 				}
 
 				interesting_in_file += interest_data(PRI_EXTENSION,
-					"extension", magic_mime_type);
+					"extension", magic_mime_type, "???");
 			}
 		}
 
@@ -911,8 +955,10 @@ interest_report data_interest_archive(const std::string & file_path,
 				coarse_libarchive_error(ret_val);
 		}
 		archive_read_free(cur_archive);
+		
+		std::string archive_hash = get_sha224(contents_bytes);
 		interesting_files += create_error_data(
-			what, mime_type);
+			what, mime_type, archive_hash);
 		return interesting_files;
 	}
 
@@ -940,6 +986,7 @@ interest_report data_interest_type(const std::string & file_path,
 	int recursion_level) {
 
 	std::string magic_mime_type = get_magic_mimetype(contents_bytes);
+	std::string hash = get_sha224(contents_bytes);
 
 	if (mime_type == "") {
 		mime_type = magic_mime_type;
@@ -951,7 +998,7 @@ interest_report data_interest_type(const std::string & file_path,
 	// If it has the proper extension for files we can't verify the contents
 	// of, that's interesting.
 	if (str_contains(extension, { ".mzx", ".mzb", ".zz3", ".zzl", ".zzm" })) {
-		return interest_data(PRI_EXTENSION, "extension", mime_type);
+		return interest_data(PRI_EXTENSION, "extension", mime_type, hash);
 	}
 
 	std::string szt_zzt;
@@ -967,7 +1014,7 @@ interest_report data_interest_type(const std::string & file_path,
 	}
 
 	if (szt_zzt != "") { return interest_data(PRI_CONTENT, szt_zzt,
-		"application/x-zzt-world"); }
+		"application/x-zzt-world", hash); }
 
 	// SZT and ZZT are sufficiently rare extensions that we flag them even if
 	// the above check doesn't trigger. This is useful for corrupted compressed
@@ -977,7 +1024,7 @@ interest_report data_interest_type(const std::string & file_path,
 		if (str_contains(magic_mime_type, {"audio/", "video/", "image/"})) {
 			return {};
 		}
-		return interest_data(PRI_EXTENSION, "extension", mime_type);
+		return interest_data(PRI_EXTENSION, "extension", mime_type, hash);
 	}
 
 	// BRD file, always check. This is sufficiently prone to false positives
@@ -985,7 +1032,7 @@ interest_report data_interest_type(const std::string & file_path,
 	if (str_contains(extension, ".brd")) {
 		if (is_brd(contents_bytes)) {
 			return interest_data(PRI_CONTENT, "brd",
-				"application/x-zzt-brd");
+				"application/x-zzt-brd", hash);
 		}
 	}
 
@@ -1002,7 +1049,8 @@ interest_report data_interest_type(const std::string & file_path,
 	if (str_contains(mime_type, "html")) {
 		std::string possible_interest = data_interest_html(contents_bytes);
 		if (possible_interest != "") {
-			return interest_data(PRI_KEYWORD, possible_interest, mime_type); }
+			return interest_data(PRI_KEYWORD, possible_interest, mime_type,
+				hash); }
 	}
 
 	// Stringify the contents so we can search it with data_interest_text.
@@ -1014,7 +1062,8 @@ interest_report data_interest_type(const std::string & file_path,
 		// there's no need for Unicode shenanigans (yet).
 		std::string possible_interest = data_interest_text(contents_text, true);
 		if (possible_interest != "") {
-			return interest_data(PRI_KEYWORD, possible_interest, mime_type); }
+			return interest_data(PRI_KEYWORD, possible_interest, mime_type,
+				hash); }
 	}
 
 	// I think I've got all the formats libarchive supports -- except mtree and zip.uu.
@@ -1066,7 +1115,7 @@ interest_report data_interest_type(const std::string & file_path,
 			// which happens pretty often when crawling web pages.
 			if (!maybe_archive && magic_mime_type != "text/html") {
 				return create_error_data(std::string("Corrupt archive file: ") +
-					e.what(), mime_type);
+					e.what(), mime_type, hash);
 			}
 		}
 	}
@@ -1078,7 +1127,7 @@ interest_report data_interest_type(const std::string & file_path,
 	std::string possible_interest = data_interest_binary_text(contents_text, true);
 	if (possible_interest != "") {
 		interesting_in_file += interest_data(PRI_KEYWORD,
-			possible_interest, mime_type); }
+			possible_interest, mime_type, hash); }
 
 	return interesting_in_file;
 
