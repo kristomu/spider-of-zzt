@@ -47,7 +47,7 @@ interest_report ZZTInterestChecker::check(
 	std::vector<char> buffer(begin, end);
 
 	return data_interest_type(
-		file_path, mime_type, buffer, recursion_level);
+		file_path, mime_type, buffer, recursion_level, true);
 }
 
 BOOST_PYTHON_MODULE(zzt_interesting) {

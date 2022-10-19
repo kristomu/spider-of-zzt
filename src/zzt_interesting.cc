@@ -387,6 +387,36 @@ std::string zzt_szt_check(const std::vector<char> & contents_bytes,
 	return "szt";
 }
 
+bool check_rle(const std::vector<char> & contents_bytes, size_t start_pos,
+	int board_size, int max_element) {
+
+	// Do a very rough RLE check because I'm getting so many false positives.
+	// The RLE format is [count] [element] [color] starting at 0x035 for ZZT
+	// and 0x3F for Super ZZT. The element type must be max 53 for ZZT and 79
+	// for Super ZZT. So we count the number of tiles up to a total of 1500
+	// (60x25) for ZZT or 7680 (96x80) for Super ZZT, and check how many tile
+	// bytes are out of range. If there are more than 20 (arbitrary threshold)
+	// then it's not a .brd file for that game type.
+
+	size_t i, tilecount = 0;
+	size_t wrong_bytes_count = 0;
+
+	for (i = start_pos; tilecount < board_size & i < contents_bytes.size();
+		i += 3) {
+
+		unsigned int rle_count = (unsigned char)contents_bytes[i];
+		if (rle_count == 0) {
+			rle_count = 256; // ZZT quirk
+		}
+		tilecount += rle_count;
+		if (contents_bytes[i+1] > max_element) {
+			++wrong_bytes_count;
+		}
+	}
+
+	return wrong_bytes_count <= 20;
+}
+
 bool is_brd(const std::vector<char> & contents_bytes) {
 	// This is harder, but:
 
@@ -410,27 +440,17 @@ bool is_brd(const std::vector<char> & contents_bytes) {
 		return false;
 	}
 
-	// Do a very rough RLE check because I'm getting so many false positives.
-	// The RLE format is [count] [element] [color] starting at 0x035. Element
-	// must be max 53 for ZZT and 79 for Super ZZT. So we count the number of
-	// tiles up to a total of 1500 (60x25 for ZZT), and check how many tile
-	// bytes are out of range. If there are more than 20 (arbitrary threshold)
-	// then it's not a .brd file.
-
-	int tilecount = 0;
-	int wrong_bytes_count = 0;
-	for (int i = 0x035; tilecount < 1500 & i < contents_bytes.size();
-		i += 3) {
-
-		tilecount += (int)contents_bytes[i];
-		if (contents_bytes[i+1] > 79) {
-			++wrong_bytes_count;
-		}
+	// Test for ZZT
+	if (check_rle(contents_bytes, 0x35, 60*25, 53)) {
+		return true;
 	}
 
-	if (wrong_bytes_count > 20) return false;
+	// Super ZZT
+	if (check_rle(contents_bytes, 0x3F, 96*80, 79)) {
+		return true;
+	}
 
-	return true;
+	return false;
 }
 
 // TOIDO: Get surrounding data.
