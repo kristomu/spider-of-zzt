@@ -7,6 +7,8 @@
 
 // TODO: Fix illegal reads detected by valgrind.
 
+// TODO: Handle .tar.gz files that are not explicitly marked as such.
+
 #pragma once
 
 #include <algorithm>
@@ -453,7 +455,108 @@ bool is_brd(const std::vector<char> & contents_bytes) {
 	return false;
 }
 
-// TOIDO: Get surrounding data.
+// MegaZeux
+// https://github.com/Sembiance/dexvert/issues/2
+// https://www.digitalmzx.com/fileform.html#world
+// https://www.digitalmzx.com/fileform.html#encryption200
+// Though it seems like password-protected MZX 1.xx files
+// have the magic offset by one byte, at byte 42 instead of
+// 41.
+
+// Returns true if the magic value substring is found
+// at contents_bytes[start_pos].
+bool check_signature(const std::vector<char> & contents_bytes,
+	const std::vector<char> & signature,
+	size_t start_pos) {
+
+	bool match = false;
+
+	for (size_t i = 0; i < signature.size(); ++i) {
+		if (i + start_pos >= contents_bytes.size()) {
+			return false;
+		}
+		if (contents_bytes[i+start_pos] != signature[i]) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
+bool check_signatures(const std::vector<char> & contents_bytes,
+	const std::vector<std::vector<char> > & signatures,
+	size_t start_pos) {
+
+	for (const auto & signature: signatures) {
+		if (check_signature(contents_bytes, signature,
+			start_pos)) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+// Returns "application/x-mzx-world", "application/x-mzx-board" or
+// "application/x-mzx-save" if the file is any of these, otherwise
+// returns the empty string.
+std::string get_mzx_type(const std::vector<char> & contents_bytes) {
+
+	// First check if it's an MZX world.
+
+	// Signatures/magic values for MegaZeux worlds. Let's be a bit
+	// generous and allow M\x02 with any suffix even though only some
+	// are strictly speaking MZX world signatures.
+	std::vector<std::vector<char> > mzx_world_sigs = {
+		vecs("MZX"), vecs("MZ2"), vecs("MZA"), vecs("M\x02")
+	};
+
+	if (contents_bytes.size() > 25 && contents_bytes[25] == 0) {
+		// Unencrypted, so the signature is at 26.
+		if (check_signatures(contents_bytes, mzx_world_sigs,
+			26)) { return "application/x-mzx-world"; }
+	} else {
+		// Encrypted, so the signature is either at 41 or 42.
+		// I can't be bothered to special-case it for MZX 1.xx.
+		for (int offset: {41, 42}) {
+			if (check_signatures(contents_bytes, mzx_world_sigs,
+				offset)) {
+				return "application/x-mzx-world";
+			}
+		}
+	}
+
+	// Now check for saves. Same thing, but the signature is
+	// at the very start. Again be generous and allow MZS\x02
+	// in full generality.
+
+	// "MZSAV" is not listed in the source; that's an MZX 1.xx
+	// save.
+
+	std::vector<std::vector<char> > mzx_save_sigs = {
+		vecs("MZSAV"), vecs("MZSV2"), vecs("MZXSA"),
+		vecs("MZS\x02")
+	};
+
+	if (check_signatures(contents_bytes, mzx_save_sigs, 0)) {
+		return "application/x-mzx-save";
+	}
+
+	// Finally, check for MZX board files. I don't know the signature
+	// for MZX 1.0x: my experiments seem to suggest that it's 0x64 0x64,
+	// but that could easily just be the viewport size.
+	// TODO: Figure out how to detect MZX 1.xx boards. Until then
+	// there is a known false negative problem here.
+	std::vector<std::vector<char> > mzx_board_sigs = {
+		vecs("\xFFMB2")
+	};
+
+	if (check_signatures(contents_bytes, mzx_board_sigs, 0)) {
+		return "application/x-mzx-board";
+	}
+
+	return "";
+}
 
 // Censor all but printables, and turn into a string.
 std::string byte_str(const std::vector<char> & byte_sequence) {
@@ -952,17 +1055,18 @@ interest_report data_interest_archive(const std::string & file_path,
 			bytes_read = 0;
 		}
 
+		std::string file_and_inner = file_path + "/" + inner_pathname;
+
 		try {
 			if (decompression_failure && bytes_read == 0) {
 				// Propagate a mime-type telling the function that we don't
 				// know what the file is because we couldn't decompress it.
-				interesting_in_file += data_interest_type( file_path + "/" +
-					inner_pathname, "application/x-unknown", unpacked_bytes,
+				interesting_in_file += data_interest_type( file_and_inner,
+					"application/x-unknown", unpacked_bytes,
 					recursion_level-1, false);
 			} else {
-				interesting_in_file += data_interest_type( file_path + "/" +
-					inner_pathname, "", unpacked_bytes, recursion_level-1,
-					true);
+				interesting_in_file += data_interest_type( file_and_inner,
+					"", unpacked_bytes, recursion_level-1, true);
 			}
 		} catch (const std::runtime_error & e) {
 			// If we got an exception, the rule is: if we find something else that's
@@ -978,8 +1082,8 @@ interest_report data_interest_archive(const std::string & file_path,
 		// with uncompressed files. (XXX: Why? I think it's because the file may
 		// be corrupted.)
 		if (interesting_in_file.results.empty()) {
-			std::string extension = lower(file_path.begin() + file_path.size() - 4,
-				file_path.end());
+			std::string extension = lower(file_and_inner.begin() +
+				file_and_inner.size() - 4, file_and_inner.end());
 			if (str_contains(extension, { ".zzt", ".brd", ".mzx", ".mzb", ".szt",
 				".zzm", ".zzl", ".zz3"})) {
 				std::string magic_mime_type = get_magic_mimetype(unpacked_bytes);
@@ -1082,7 +1186,7 @@ interest_report data_interest_type(const std::string & file_path,
 
 	// If it has the proper extension for files we can't verify the contents
 	// of, that's interesting.
-	if (str_contains(extension, { ".mzx", ".mzb", ".zz3", ".zzl", ".zzm" })) {
+	if (str_contains(extension, { ".zz3", ".zzl", ".zzm" })) {
 		return interest_data(PRI_EXTENSION, "extension", mime_type, hash);
 	}
 
@@ -1100,17 +1204,6 @@ interest_report data_interest_type(const std::string & file_path,
 
 	if (szt_zzt != "") { return interest_data(PRI_CONTENT, szt_zzt,
 		"application/x-zzt-world", hash); }
-
-	// SZT and ZZT are sufficiently rare extensions that we flag them even if
-	// the above check doesn't trigger. This is useful for corrupted compressed
-	// data or data compressed using an unsupported method such as Implode.
-	if (str_contains(extension, std::vector<std::string>({ ".szt", ".zzt"}))) {
-		// Don't check what looks like images, audio files or video files.
-		if (str_contains(magic_mime_type, {"audio/", "video/", "image/"})) {
-			return {};
-		}
-		return interest_data(PRI_EXTENSION, "extension", mime_type, hash);
-	}
 
 	// BRD file, always check. This is sufficiently prone to false positives
 	// that we only check with the correct extension.
@@ -1130,6 +1223,17 @@ interest_report data_interest_type(const std::string & file_path,
 		if (is_brd(contents_bytes)) {
 			return interest_data(PRI_CONTENT, "brd",
 				"application/x-zzt-brd", hash);
+		}
+	}
+
+	// Check for MegaZeux
+	if (str_contains(extension,
+		std::vector<std::string>({ ".mzx", ".mzb", ".sav"}))) {
+
+		std::string possible_mzx_type = get_mzx_type(contents_bytes);
+		if (possible_mzx_type != "") {
+			return interest_data(PRI_CONTENT, "megazeux",
+				possible_mzx_type, hash);
 		}
 	}
 
@@ -1160,7 +1264,8 @@ interest_report data_interest_type(const std::string & file_path,
 		std::string possible_interest = data_interest_text(contents_text, true);
 		if (possible_interest != "") {
 			return interest_data(PRI_KEYWORD, possible_interest, mime_type,
-				hash); }
+				hash);
+		}
 	}
 
 	// I think I've got all the formats libarchive supports -- except mtree and zip.uu.
@@ -1183,7 +1288,7 @@ interest_report data_interest_type(const std::string & file_path,
 	// These can be archives, but also have other uses: don't count corrupt results
 	// against it. This list is mainly dos executables (self-extracting archives).
 	std::vector<std::string> possible_archive_mimetypes = {
-		"application/x-dosexec", "application/octet-stream"
+		"application/x-dosexec", "application/octet-stream",
 	};
 
 	std::vector<std::string> possible_archive_extensions = { ".exe" };
@@ -1225,6 +1330,26 @@ interest_report data_interest_type(const std::string & file_path,
 	if (possible_interest != "") {
 		interesting_in_file += interest_data(PRI_KEYWORD,
 			possible_interest, mime_type, hash); }
+
+	// Finally, return extension checks for files that either we can't match
+	// or that should have been matched before.
+	if (str_contains(extension,
+		std::vector<std::string>({".mzx", ".mzb"}))) {
+
+		return interest_data(PRI_EXTENSION, "extension", mime_type, hash);
+	}
+
+	// SZT and ZZT are sufficiently rare extensions that we flag them even if
+	// the above check doesn't trigger. This is useful for corrupted compressed
+	// data or data compressed using an unsupported method such as Implode.
+	if (str_contains(extension, std::vector<std::string>({ ".szt", ".zzt"}))) {
+		// Don't check what looks like images, audio files or video files.
+		if (str_contains(magic_mime_type, {"audio/", "video/", "image/"})) {
+			return {};
+		}
+		return interest_data(PRI_EXTENSION, "extension", mime_type, hash);
+	}
+
 
 	return interesting_in_file;
 
