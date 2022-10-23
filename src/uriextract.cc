@@ -710,6 +710,21 @@ bool TEST_extract_uris_text() {
 		expected, unwanted);
 }
 
+// An idea here is to first dump all tags into a suitable data structure, and then
+// do the equivalent of Python's findall on this data structure. But what should
+// the data structure be? I'm thinking something like
+// map of string (tag name) to
+//		list of entries
+//		each of which is a list of pairs of attributes and values.
+// Although I could be inclined to make an entry a map from attribute to value, so
+// that it would be easy to do something like if (contains(entry, "http-equiv"))
+// similar to the Python version's get().
+
+// Yeah, let's do that.
+
+typedef std::map<std::string, std::string> tag_entry;
+typedef std::map<std::string, std::vector<tag_entry> > html_tags;
+
 std::vector<std::string> extract_uris_html(xmlNode * branch_root,
 	const std::string & base_url, bool strip_tags) {
 
@@ -729,13 +744,25 @@ std::vector<std::string> extract_uris_html(xmlNode * branch_root,
 		std::vector<std::string> urls_from_node;
 
 		// Check with tests if this returns what we want it to return..
-		if(current_node->type == XML_TEXT_NODE) {
-			urls_from_node = extract_uris_text(
-				(char *)current_node->content, true);
-		} else {
-			urls_from_node = extract_uris_html(current_node->children,
-				base_url, strip_tags);
+		switch(current_node->type) {
+			case XML_TEXT_NODE:
+				urls_from_node = extract_uris_text(
+					(char *)current_node->content, true);
+				break;
+			case XML_ELEMENT_NODE: // e.g. links or base tags
+				std::cout << current_node->name << std::endl;
+				if (std::string((const char *)current_node->name) == "a") {
+					std::cout << "VF: " << xmlGetProp(current_node,
+						(const xmlChar *)"href") << std::endl;
+				}
+				break;
 		}
+
+		std::copy(urls_from_node.begin(), urls_from_node.end(),
+			std::back_inserter(urls));
+
+		urls_from_node = extract_uris_html(current_node->children,
+			base_url, strip_tags);
 
 		std::copy(urls_from_node.begin(), urls_from_node.end(),
 			std::back_inserter(urls));

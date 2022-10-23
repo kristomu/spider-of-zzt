@@ -80,10 +80,11 @@ class easy_handle_container {
 				"Mozilla/5.0 (compatible; bot-SpiderOfZZT/0.1)");
 			curl_easy_setopt(handle, CURLOPT_FILETIME, 1);
 
-			// 5 minutes timeout. We can be generous as it's going to be used
-			// asynchronously.
-			curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, 300L);
-			curl_easy_setopt(handle, CURLOPT_TIMEOUT, 300L);
+			// 2.5 minutes timeout. We can be generous as it's going to be used
+			// asynchronously. (Actually, no, because this leads to a terminating
+			// state where every socket is waiting for something to time out.)
+			curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, 150L);
+			curl_easy_setopt(handle, CURLOPT_TIMEOUT, 150L);
 
 			// We need to be able to access the data from multi, so set a private
 			// pointer.

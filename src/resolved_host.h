@@ -8,6 +8,11 @@
 
 // Should this contain a port so that each thread only accesses a particular
 // host:port combination? I don't think that's necessary so far...
+
+// TODO: bool valid_IP(bool intranet_allowed); should do what you expect and
+// always reject 0.x.y.z or TEST-NETs, and also private addresses if intranet_
+// allowed is false. (for IPv4)
+
 class resolved_host {
 	private:
 		// If possibly_IP is an IP address, set the resolved host to this IP and

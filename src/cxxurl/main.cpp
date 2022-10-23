@@ -68,6 +68,10 @@ void test_all_valid() {
     test_valid(user_info,"",user_info,"",-1);
     test_valid(user_info,"user:passwd",user_info,"user:passwd",-1);
     test_parse("http://user:pa%24%24wd@www.example.com",user_info,"user:pa$$wd");
+    test_parse("file://C:/WINDOWS/WIN.COM", scheme, "file");
+    test_parse("file:///etc/passwd", scheme, "file");
+    test_parse("mailto:foo@bar.com", scheme, "mailto");
+    test_parse("mailto:foo@[192.168.0.2]", scheme, "mailto");
 
     cout << "------------------------------------------------------" << endl;
     cout << "Test host" << endl;

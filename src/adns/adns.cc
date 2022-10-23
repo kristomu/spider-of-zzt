@@ -13,6 +13,10 @@
 
 #include "../resolved_host.h"
 
+// TODO: Prepopulate the failure array so that when we get an error without
+// a hostname, we can still detect which hosts failed by making note of which
+// ones actually succeeded.
+
 // For keeping a record of a lookup failure.
 class lookup_failure {
 	public:
@@ -185,6 +189,11 @@ void adns_lookup::lookup(const std::vector<std::string> & hosts,
 		if (res) {
 			throw std::logic_error("Error while waiting for DNS response: " +
 				std::string(strerror(res)));
+		}
+
+		if (answer->status != adns_s_ok && answer->owner == NULL) {
+			std::cout << "Error on unknown domain: " << adns_strerror(answer->status) << std::endl;
+			continue;
 		}
 
 		std::string host = answer->owner;

@@ -20,6 +20,9 @@
 // TODO: Measure urls per sec and lookups per sec.
 // TODO: Print start time (before lookup phases).
 
+// TODO: With a very large number of connections, we might exhaust the number of fds
+// available to the user. Somehow deal with that.
+
 #include <iostream>
 #include <fstream>
 #include <cstring>
@@ -48,8 +51,12 @@ std::string hostname(const std::string url) {
 	// Look for either : or /, so that we strip either the port or the /, whichever is
 	// closer.
 	size_t end = url.find_first_of("/:", start+3);
-	if (start == std::string::npos || end == std::string::npos) {
+	if (start == std::string::npos) {
 		throw std::runtime_error("String is not a :// url: " + url);
+	}
+	if (end == std::string::npos) {
+		// URLs without a path, e.g. http://www.example.com
+		return (std::string(url.begin()+start+3, url.end()));
 	}
 	// return substring between these.
 	return std::string(url.begin()+start+3, url.begin()+end);
@@ -101,13 +108,25 @@ int main() {
 		seen.insert(host);
 	}
 
-	dns_lookup.lookup(hostnames, 5);
-	host_to_IPs = dns_lookup.host_to_IPs;
+	// Requesting thousands of hostnames at once can lead to all of them
+	// timing out.
+	for (size_t i = 0; i < hostnames.size(); i += 2000) {
+		std::vector<std::string> hostnames_chunk(hostnames.begin()+i,
+			hostnames.begin()+std::min(i+20000, hostnames.size()));
+		dns_lookup.lookup(hostnames_chunk, 35);
+		host_to_IPs.insert(dns_lookup.host_to_IPs.begin(),
+			dns_lookup.host_to_IPs.end());
+	}
+
+	//dns_lookup.lookup(hostnames, 10);
+	//host_to_IPs = dns_lookup.host_to_IPs;
 
 	// Second pass: Assign each URL to the appropriate host IP.
 	// TODO: somehow populate
 
 	for (std::string url: input_URLs) {
+		// HACK. Apparently plain async is faster on my new ISP than my elaborate
+		// scheme. Oder nichts?
 		std::string host = hostname(url);
 		std::vector<resolved_host> host_info;
 
@@ -118,9 +137,9 @@ int main() {
 			continue;
 		}
 
-		for (resolved_host h: host_info) {
+		/*for (resolved_host h: host_info) {
 			std::cout << "Lookup: " << hostname(url) << "\t" << h.rendered_ip() << std::endl;
-		}
+		}*/
 
 		// Perhaps spread the load out somehow? Or should this be the responsibility
 		// of the slurper threads? In the latter case, we should use
@@ -136,8 +155,8 @@ int main() {
 	curl_global_init(CURL_GLOBAL_ALL); // not thread safe
 
 	// Turning this very high (e.g. 8) makes a lot of URLs fail. Why?
-	// Also with optimization that happens. Why?
-	int NUM_DISTINCT_IPS = 32;
+	// Also with optimization that happens. Why? (Try something sneaky here...)
+	int NUM_DISTINCT_IPS = 64;
 
 	std::vector<curl_slurper> slurpers;
 	std::vector<std::shared_ptr<safe_queue<work_order> > > slurper_queues;
@@ -182,6 +201,8 @@ int main() {
 	}
 
 	bool all_idle = false;
+
+	std::vector<response> responses;
 
 	while (!all_idle) {
 		std::cout << "It will be Short and it will be short. The time is " << now_str() << std::endl;
@@ -257,7 +278,20 @@ int main() {
 			URL_per_host.erase(thread_host[cur_thread]);
 		}
 
-		usleep(72703); //727003
+
+		// Handle responses, and remove them to save memory.
+		// (In practice, we'd dump to disk here or somthn)
+		response_queue->output(responses);
+		if (responses.size() > 0) {
+			std::cout << "Number of new responses: " << responses.size() << std::endl;
+			for (const response & res: responses) {
+				std::cout << "Response: URL: " << res.requested_URL << " error: "
+					<< res.error << " data size: " << res.data.size() << " interest:" << highest_priority_interest_type(res.requested_URL, "", res.data) << std::endl;
+			}
+			responses.clear();
+		}
+
+		usleep(727003); //727003
 	}
 
 	// Shut down the threads
@@ -281,7 +315,6 @@ int main() {
 	// Deal with some still reachable stuff to please valgrind.
 	PR_Cleanup();
 
-	std::vector<response> responses;
 	response_queue->output(responses);
 	std::cout << "Number of responses: " << responses.size() << std::endl;
 	std::cout << "Phase two performance: " <<
