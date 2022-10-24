@@ -1,4 +1,6 @@
-#include "zzt_interesting.cc"
+#include "formats/zzt_interesting.h"
+#include "filetools.h"
+#include <iostream>
 
 int main(int argc, char ** argv) {
 	TEST_interesting();

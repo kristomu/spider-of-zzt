@@ -1,20 +1,8 @@
-#include "zzt_interesting.cc"
+#include "formats/zzt_interesting.h"
+
 #include <boost/python.hpp>
 #include <boost/python/suite/indexing/vector_indexing_suite.hpp>
 namespace py = boost::python;
-
-/*class TestClass {
-	public:
-		void print() const {
-			std::cout << "Hello there." << std::endl;
-		}
-};
-
-// Interfacing information
-BOOST_PYTHON_MODULE(world) {
-	class_<TestClass>("TestClass")
-		.def("print", &TestClass::print);
-}*/
 
 // A simple wrapper to get as much of the job done with minimal fuss.
 // I could export interest_data directly but I don't feel like I know

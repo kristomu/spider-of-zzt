@@ -9,8 +9,6 @@
 
 // TODO: Handle .tar.gz files that are not explicitly marked as such.
 
-#pragma once
-
 #include <algorithm>
 #include <iostream>
 #include <iterator>
@@ -31,6 +29,11 @@
 #include <libxml/HTMLparser.h>	// HTML parsing (TODO: XML)
 #include <openssl/sha.h>		// Hash calculations.
 
+#include "../filetools.h"
+#include "zzt_interesting.h"
+
+// ZZT-specific headers and constants
+
 struct zzt_header {
 	int16_t magic;
 	uint16_t boards;
@@ -39,13 +42,12 @@ struct zzt_header {
 struct brd_header {
 	int16_t board_size;
 	int8_t title_length;
-	char title[50];
 };
 
 const int ZZT_HEADER_MAGIC = -1, SUPERZZT_HEADER_MAGIC = -2;
 
 // Determine various types of magic information: mime encoding and type.
-// Only looks at the first 1K for speed.
+// Only looks at the first 1K for speed if quick is enabled.
 std::string get_magic(const std::vector<char> & contents_bytes, int type,
 	bool quick) {
 
@@ -236,43 +238,6 @@ std::string get_surrounding_text(const std::string & text,
 	}
 
 	return excerpt;
-}
-
-// https://stackoverflow.com/questions/4553012
-bool is_file(std::string filename) {
-	struct stat path_stat;
-	stat(filename.data(), &path_stat);
-	return S_ISREG(path_stat.st_mode);
-}
-
-
-// Note: this will choke with extremely large files! I don't know how to
-// deal with them yet.
-
-std::vector<char> file_to_vector(std::string filename) {
-	if (!is_file(filename)) {
-		throw std::runtime_error("file_to_vector: not a regular file: "
-			+ filename);
-	}
-
-	std::ifstream in_file(filename, std::ios::binary);
-
-	if (!in_file || in_file.fail()) {
-		throw std::runtime_error("file_to_vector: can't open " + filename + ": "
-			+ strerror(errno));
-	}
-
-	// Get the size of the file.
-	std::streampos file_size;
-
-	in_file.seekg(0, std::ios::end);
-	file_size = in_file.tellg();
-	in_file.seekg(0, std::ios::beg);
-
-	// And then read the data.
-	std::vector<char> file_contents(file_size);
-	in_file.read(file_contents.data(), file_size);
-	return file_contents;
 }
 
 // This function returns the empty string if the file is neither a ZZT nor
@@ -832,86 +797,6 @@ std::string get_sha224(const std::vector<char> & contents_bytes) {
 	return to_hex(get_sha224_raw(contents_bytes));
 }
 
-// TODO: Somehow not print the hash if the file wasn't actually
-// uncompressed, instead of outputting a hash for a zero byte file.
-
-class interest_data {
-	public:
-		bool archive;
-		int priority;				// higher is more important
-		std::string internal_path;	// treats archives as directories
-		std::string interest_type;
-		std::string mime_type;		// for distinguishing false positives
-
-		// Human-readable SHA224 hash of the file, used for filtering out
-		// known ZZT files.
-		std::string file_hash;
-
-		// For reporting non-fatal errors that might still produce false
-		// negatives (e.g. unsupported compression method, corrupted file).
-		std::string error;
-
-		bool is_error() const { return error != ""; }
-
-		std::string str() const {
-			std::string conclusion = interest_type;
-			if (is_error()) {
-				conclusion = " [ERR] " + error;
-			}
-
-			// Quick and dirty HACK to deal with non-UTF8 archive
-			// names. It'd be better to just return them as bytes
-			// to python and then try to decode there: or to be
-			// more principled and do the charset decoding on a
-			// filename basis here, and return a UTF-8 string.
-			// but for now...
-			std::string sanitized_path = internal_path;
-			if (!utf8_check_is_valid(sanitized_path)) {
-				for (char & x: sanitized_path) {
-					if (x < 0) x = '_';
-				}
-			}
-
-			// Ditto the conclusion, as some RAR-related libarchive error
-			// messages also contain the filename.
-			if (!utf8_check_is_valid(conclusion)) {
-				for (char & x: conclusion) {
-					if (x < 0) x = '_';
-				}
-			}
-
-			if (conclusion == "") {
-				return conclusion;
-			}
-
-			std::string preamble = "(mt: " + mime_type + ", sha224: " +
-				file_hash + ") ";
-
-			if (internal_path == "") {
-				return preamble + conclusion;
-			}
-
-			if (archive) {
-				return preamble + "archive[" + sanitized_path + "]:" + conclusion;
-			} else {
-				return preamble + sanitized_path + ":" + conclusion;
-			}
-		}
-
-		bool interesting() const { return interest_type != ""; }
-
-		interest_data() {}
-
-		interest_data(int priority_in, const std::string & interest_type_in,
-			const std::string & mime_type_in, const std::string & hash_in) {
-			archive = false;
-			priority = priority_in;
-			interest_type = interest_type_in;
-			mime_type = mime_type_in;
-			file_hash = hash_in;
-		}
-};
-
 // secondary constructor of sorts
 interest_data create_error_data(std::string error, std::string mime_type,
 	std::string file_hash) {
@@ -922,55 +807,11 @@ interest_data create_error_data(std::string error, std::string mime_type,
 	return error_out;
 }
 
-class interest_report {
-	public:
-		std::vector<interest_data> results;
-		std::vector<interest_data> errors;
-
-		void add_entry(const interest_data & new_entry) {
-			if (new_entry.is_error()) {
-				errors.push_back(new_entry);
-			} else {
-				results.push_back(new_entry);
-			}
-		}
-
-		interest_report() {}
-		interest_report(interest_data sole_result) {
-			add_entry(sole_result);
-		}
-
-		void operator+=(const interest_report & other) {
-			std::copy(other.results.begin(), other.results.end(),
-				std::back_inserter(results));
-			std::copy(other.errors.begin(), other.errors.end(),
-				std::back_inserter(errors));
-		}
-
-		void operator+=(const interest_data & new_entry) {
-			add_entry(new_entry);
-		}
-};
-
-// Required by the Python vector indexing suite for some reason.
-bool operator==(const interest_data & lhs, const interest_data & rhs) {
-    return lhs.archive == rhs.archive &&
-		lhs.priority == rhs.priority &&
-		lhs.internal_path == rhs.internal_path &&
-		lhs.interest_type == rhs.interest_type;
-}
-
-// file_ok is set to false if this is called by a failing archive extraction
-// (to get extension or similar), so that we know not to set a hash.
-interest_report data_interest_type(const std::string & file_path,
-	std::string mime_type, const std::vector<char> & contents_bytes,
-	int recursion_level, bool file_ok);
-
 interest_report data_interest_type(const std::string & file_path,
 	std::string mime_type, const std::vector<char> & contents_bytes) {
 
-	return data_interest_type(file_path, mime_type, contents_bytes, 3,
-		true);
+	return data_interest_type(file_path, mime_type, contents_bytes,
+		DEFAULT_RECURSION_LEVEL, true);
 }
 
 std::string coarse_libarchive_error(int ret_val) {

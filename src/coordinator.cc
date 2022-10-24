@@ -42,7 +42,7 @@
 #include "slurper.h"
 
 #include "adns/adns.cc"
-#include "zzt_interesting.cc"
+#include "formats/zzt_interesting.h"
 
 // Ugly as sin. TODO: Replace with a proper library that can handle mailto etc.
 std::string hostname(const std::string url) {
