@@ -354,13 +354,19 @@ std::string zzt_szt_check(const std::vector<char> & contents_bytes,
 	return "szt";
 }
 
-bool check_rle(const std::vector<char> & contents_bytes, size_t start_pos,
+// RLE checker for is_brd. This returns the number of tiles with a too high
+// element type when parsing contents_bytes from start_pos on for board_size
+// tiles in total as the ZZT or Super ZZT RLE format.
+// NOTE: It's not currently very good at transposition errors
+// (deleted or inserted bytes).
+int check_rle(const std::vector<char> & contents_bytes, size_t start_pos,
 	int board_size, int max_element) {
 
 	// Do a very rough RLE check because I'm getting so many false positives.
 	// The RLE format is [count] [element] [color] starting at 0x035 for ZZT
-	// and 0x3F for Super ZZT. The element type must be max 53 for ZZT and 79
-	// for Super ZZT. So we count the number of tiles up to a total of 1500
+	// and 0x3F for Super ZZT. The official element maxima are 53 for ZZT and 79
+	// for Super ZZT, but ZZT can support blinking text too, bringing the total
+	// value up to 61. So we count the number of tiles up to a total of 1500
 	// (60x25) for ZZT or 7680 (96x80) for Super ZZT, and check how many tile
 	// bytes are out of range. If there are more than 20 (arbitrary threshold)
 	// then it's not a .brd file for that game type.
@@ -381,10 +387,17 @@ bool check_rle(const std::vector<char> & contents_bytes, size_t start_pos,
 		}
 	}
 
-	return wrong_bytes_count <= 20;
+	return wrong_bytes_count;
 }
 
-bool is_brd(const std::vector<char> & contents_bytes) {
+bool is_brd(const std::vector<char> & contents_bytes,
+	bool check_zzt, bool check_szt, int max_unknown_tiles) {
+
+	if (!check_zzt && !check_szt) {
+		throw std::logic_error("is_brd: Was told to "
+			"neither check for ZZT nor SZT boards!");
+	}
+
 	// This is harder, but:
 
 	// The first two bytes give the size of the board, which should be in the rough
@@ -401,23 +414,44 @@ bool is_brd(const std::vector<char> & contents_bytes) {
 	brd_header possible_header;
 	memcpy(&possible_header, contents_bytes.data(), sizeof(brd_header));
 
+	int max_title_length = 50;
+	if (check_szt) {
+		max_title_length = 60;
+	}
+
 	if (possible_header.board_size < 53 || (size_t)possible_header.board_size >
 		contents_bytes.size()*2) { return false; }
-	if (possible_header.title_length > 60 || possible_header.title_length < 0) {
+	if (possible_header.title_length > max_title_length ||
+		possible_header.title_length < 0) {
 		return false;
 	}
 
 	// Test for ZZT
-	if (check_rle(contents_bytes, 0x35, 60*25, 53)) {
+	if (check_zzt &&
+		check_rle(contents_bytes, 0x35, 60*25, 61) <= max_unknown_tiles) {
 		return true;
 	}
 
 	// Super ZZT
-	if (check_rle(contents_bytes, 0x3F, 96*80, 79)) {
+	if (check_szt &&
+		check_rle(contents_bytes, 0x3F, 96*80, 79) <= max_unknown_tiles) {
 		return true;
 	}
 
 	return false;
+}
+
+bool is_brd(const std::vector<char> & contents_bytes,
+	bool check_zzt, bool check_szt) {
+	// This can be used to tune false positives vs negatives.
+	const int MAX_TILE_ERRORS = 20;
+
+	return is_brd(contents_bytes, check_zzt, check_szt,
+		MAX_TILE_ERRORS);
+}
+
+bool is_brd(const std::vector<char> & contents_bytes) {
+	return is_brd(contents_bytes, true, true);
 }
 
 // MegaZeux

@@ -13,7 +13,12 @@ std::string zzt_szt_check(const std::vector<char> & contents_bytes,
 	bool multiple_boards_reqd);
 
 // This function returns true if the vector (most likely) contains a ZZT
-// board.
+// or SZT board. Set check_zzt to true to check for a ZZT board, check_szt
+// to true to check for Super ZZT, or both to check for both.
+bool is_brd(const std::vector<char> & contents_bytes,
+	bool check_zzt, bool check_szt);
+
+// This checks for both.
 bool is_brd(const std::vector<char> & contents_bytes);
 
 // Returns "application/x-mzx-world", "application/x-mzx-board" or
