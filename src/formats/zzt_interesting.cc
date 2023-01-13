@@ -861,17 +861,47 @@ std::string coarse_libarchive_error(int ret_val) {
 // Check if an archive contains interesting files. The recursion level parameter
 // stops quines and ZIP bombs from causing infinite loops.
 
-interest_report data_interest_archive(const std::string & file_path,
-	std::string mime_type, const std::vector<char> & contents_bytes,
-	int recursion_level) {
+class archive_parser {
+	public:
+		archive * cur_archive;
+		archive_entry * entry;
 
-	interest_report interesting_files;
+		bool clean_exit;
 
-	if (recursion_level <= 0) { return interesting_files; }
+		std::string entry_pathname;
+		size_t entry_file_size;
 
-	archive * cur_archive;
-	archive_entry * entry;
+		archive_parser() { cur_archive = NULL; }
 
+		~archive_parser() {
+			if (cur_archive != NULL) {
+				archive_read_free(cur_archive);
+			}
+		}
+
+		// The following functions all have significant side effects.
+		// This is intentional; I'm going to abstract away the inner
+		// functioning of the archive parser so that I can
+		void read_archive(const std::vector<char> & contents_bytes);
+		bool read_next_metadata();
+
+		// Returns the number of bytes read. < 0 if something happened.
+		int uncompress_entry(std::vector<char> & unpacked_bytes_dest);
+
+		// Get an error, or empty string for none.
+		std::string get_error();
+
+		// TODO? Manual cleanup for not keeping a bunch of archive data in
+		// memory any longer than needed???
+
+		// TODO: Static method that gives the extensions and mimetypes
+		// it can handle.
+};
+
+// TODO: Clean up to properly return error values, etc.
+// But first get this working!
+
+void archive_parser::read_archive(const std::vector<char> & contents_bytes) {
 	int ret_val;
 
 	cur_archive = archive_read_new();
@@ -882,50 +912,90 @@ interest_report data_interest_archive(const std::string & file_path,
 
 	if (ret_val != ARCHIVE_OK) {
 		std::string err = archive_error_string(cur_archive);
-		archive_read_free(cur_archive);
+		//archive_read_free(cur_archive);
 		throw std::runtime_error("Error unpacking archive: " + err);
 	}
+}
+
+// Returns false if it can't read the next metadata, and sets clean_exit
+// to false if that was unexpected. If true, it also populates entry info
+// as a side effect.
+bool archive_parser::read_next_metadata() {
+	int x_ret_val = archive_read_next_header(cur_archive, &entry);
+	if (x_ret_val != ARCHIVE_OK && x_ret_val != ARCHIVE_WARN) {
+		// If the reason we stop parsing is unexpected, set a
+		// boolean to that effect.
+		if (x_ret_val != ARCHIVE_EOF) {
+			clean_exit = false;
+		}
+		clean_exit = true;
+		return false;
+	}
+
+	// Work around a libarchive limitation where non-ASCII letters can
+	// cause archive_entry_pathname to return NULL.
+	// I can't be arsed to fix it in source.
+	// https://github.com/libarchive/libarchive/issues/1572
+	entry_pathname = "<UNKNOWN FOREIGN>";
+	const char * pathname_ptr = archive_entry_pathname(entry);
+	if (pathname_ptr != NULL) {
+		entry_pathname = pathname_ptr;
+	}
+
+	entry_file_size = archive_entry_size(entry);
+
+	return true;
+}
+
+int archive_parser::uncompress_entry(std::vector<char> &unpacked_bytes_dest) {
+	unpacked_bytes_dest.resize(entry_file_size);
+	return archive_read_data(cur_archive,
+		unpacked_bytes_dest.data(), unpacked_bytes_dest.size());
+}
+
+std::string archive_parser::get_error() {
+	// TODO, make this proper. If the error string is "", check
+	// if ret_val indicates an error, and if so, return it.
+	return archive_error_string(cur_archive);
+}
+
+interest_report data_interest_archive(const std::string & file_path,
+	std::string mime_type, const std::vector<char> & contents_bytes,
+	int recursion_level) {
+
+	interest_report interesting_files;
+
+	if (recursion_level <= 0) { return interesting_files; }
+
+	archive_parser parse;
+
+	//int ret_val;
+	parse.read_archive(contents_bytes);
 
 	std::runtime_error inherited_exception("placeholder");
 	bool got_exception = false;
-	ret_val = ARCHIVE_OK;
+	//bool clean_exit = true;
+	//ret_val = ARCHIVE_OK;
 
-	while (ret_val == ARCHIVE_OK || ret_val == ARCHIVE_WARN) {
+	while (parse.read_next_metadata()) {
 
 		interest_report interesting_in_file;
 		bool decompression_failure = false;
 
-		ret_val = archive_read_next_header(cur_archive, &entry);
-		if (ret_val != ARCHIVE_OK && ret_val != ARCHIVE_WARN) {
-			continue;
-		}
-
-		// Work around a libarchive limitation where non-ASCII letters can
-		// cause archive_entry_pathname to return NULL.
-		// I can't be arsed to fix it in source.
-		// https://github.com/libarchive/libarchive/issues/1572
-		std::string inner_pathname = "<UNKNOWN FOREIGN>";
-		const char * pathname_ptr = archive_entry_pathname(entry);
-		if (pathname_ptr != NULL) {
-			inner_pathname = pathname_ptr;
-		}
-
-		size_t inner_file_size = archive_entry_size(entry);
+		std::string inner_pathname = parse.entry_pathname;
 
 		// Avoid ZIP bombs and other very large files. (32M max)
-		if (inner_file_size > (1<<25)) { continue; }
+		if (parse.entry_file_size > (1<<25)) { continue; }
 
-		std::vector<char> unpacked_bytes(inner_file_size);
-		int bytes_read = archive_read_data(cur_archive, unpacked_bytes.data(),
-			unpacked_bytes.size());
+		std::vector<char> unpacked_bytes;
+		int bytes_read = parse.uncompress_entry(unpacked_bytes);
 
 		// Check if the compression method is supported. If not, clear the data
 		// array so we can still check for extensions and the likes.
 		if (bytes_read < 0) {
 			decompression_failure = true;
-			interesting_in_file += create_error_data(
-				archive_error_string(cur_archive), "application/x-unknown",
-				"???");
+			interesting_in_file += create_error_data(parse.get_error(),
+				"application/x-unknown", "???");
 			unpacked_bytes.resize(0);
 			bytes_read = 0;
 		}
@@ -933,7 +1003,7 @@ interest_report data_interest_archive(const std::string & file_path,
 		std::string file_and_inner = file_path + "/" + inner_pathname;
 
 		try {
-			if (decompression_failure && bytes_read == 0) {
+			if (decompression_failure && bytes_read == 0) {		// ????
 				// Propagate a mime-type telling the function that we don't
 				// know what the file is because we couldn't decompress it.
 				interesting_in_file += data_interest_type( file_and_inner,
@@ -1003,17 +1073,18 @@ interest_report data_interest_archive(const std::string & file_path,
 		interesting_files += interesting_in_file;
 	}
 
-	if (ret_val != ARCHIVE_OK && ret_val != ARCHIVE_EOF) {
+	if (!parse.clean_exit) {
 		std::string what;
 
-		if (archive_error_string(cur_archive)) {
+		if (parse.get_error() != "") {
 			what = "Error reading from archive " + file_path + ": " +
-				archive_error_string(cur_archive);
+				parse.get_error();
 		} else {
-			what = "Error reading from archive " + file_path + ": " +
-				coarse_libarchive_error(ret_val);
+			// TODO, make this proper again once the code has been ported
+			// up to the parser.
+			what = "Error reading from archive " + file_path;/* + ": " +
+				coarse_libarchive_error(ret_val);*/
 		}
-		archive_read_free(cur_archive);
 		
 		std::string archive_hash = get_sha224(contents_bytes);
 		interesting_files += create_error_data(
@@ -1021,11 +1092,10 @@ interest_report data_interest_archive(const std::string & file_path,
 		return interesting_files;
 	}
 
-	ret_val = archive_read_free(cur_archive);
-	if (ret_val != ARCHIVE_OK) {
+	/*if (archive_read_free(parse.cur_archive) != ARCHIVE_OK) {
 		throw(std::runtime_error("Error freeing archive " + file_path + ": " +
-			archive_error_string(cur_archive)));
-	}
+			archive_error_string(parse.cur_archive)));
+	}*/
 
 	if (interesting_files.results.empty() && got_exception) {
 		throw(inherited_exception);
