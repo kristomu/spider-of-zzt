@@ -6,11 +6,15 @@
 #include <archive.h>		// Ditto
 
 class libarchive_parser : public archive_parser {
-	public:
+	private:
 		archive * cur_archive;
 		archive_entry * entry;
+		std::string coarse_error;
 
-		bool clean_exit;
+		std::string get_coarse_libarchive_error(
+			int libarchive_ret_val) const;
+
+	public:
 
 		std::string entry_pathname;
 		size_t entry_file_size;
@@ -27,7 +31,7 @@ class libarchive_parser : public archive_parser {
 		void read_archive(const std::vector<char> & contents_bytes);
 
 		// This reads the next entry's metadata (file size, etc).
-		bool read_next_metadata();
+		read_state read_next_metadata();
 
 		// Uncompress an entry (inner file) to the given vector, clearing it
 		// beforehand.

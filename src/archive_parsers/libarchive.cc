@@ -1,6 +1,18 @@
 #include "libarchive.h"
 #include <stdexcept>
 
+std::string libarchive_parser::get_coarse_libarchive_error(
+	int libarchive_ret_val) const {
+
+	switch(libarchive_ret_val) {
+		case ARCHIVE_RETRY: return "ARCHIVE_RETRY";
+		case ARCHIVE_WARN: return "ARCHIVE_WARN";
+		case ARCHIVE_FAILED: return "ARCHIVE_FAILED";
+		case ARCHIVE_FATAL: return "ARCHIVE_FATAL";
+		default: return "Unknown libarchive error";
+	}
+}
+
 // TODO: Clean up to properly return error values, etc.
 // But first get this working!
 
@@ -23,16 +35,19 @@ void libarchive_parser::read_archive(const std::vector<char> & contents_bytes) {
 // Returns false if it can't read the next metadata, and sets clean_exit
 // to false if that was unexpected. If true, it also populates entry info
 // as a side effect.
-bool libarchive_parser::read_next_metadata() {
-	int x_ret_val = archive_read_next_header(cur_archive, &entry);
-	if (x_ret_val != ARCHIVE_OK && x_ret_val != ARCHIVE_WARN) {
+// TODO: use enum instead: OK, all done, recoverable error
+// (just go to the next one, but ask for an error first)
+// and unrecoverable error (stop).
+read_state libarchive_parser::read_next_metadata() {
+	int hdr_read_status = archive_read_next_header(cur_archive, &entry);
+	if (hdr_read_status != ARCHIVE_OK && hdr_read_status != ARCHIVE_WARN) {
 		// If the reason we stop parsing is unexpected, set a
 		// boolean to that effect.
-		if (x_ret_val != ARCHIVE_EOF) {
-			clean_exit = false;
+		if (hdr_read_status != ARCHIVE_EOF) {
+			coarse_error = get_coarse_libarchive_error(hdr_read_status);
+			return AP_ERROR;
 		}
-		clean_exit = true;
-		return false;
+		return AP_DONE;
 	}
 
 	// Work around a libarchive limitation where non-ASCII letters can
@@ -47,7 +62,7 @@ bool libarchive_parser::read_next_metadata() {
 
 	entry_file_size = archive_entry_size(entry);
 
-	return true;
+	return AP_OK;
 }
 
 int libarchive_parser::uncompress_entry(std::vector<char> &unpacked_bytes_dest) {
@@ -57,7 +72,10 @@ int libarchive_parser::uncompress_entry(std::vector<char> &unpacked_bytes_dest) 
 }
 
 std::string libarchive_parser::get_error() {
-	// TODO, make this proper. If the error string is "", check
-	// if ret_val indicates an error, and if so, return it.
-	return archive_error_string(cur_archive);
+	std::string error = archive_error_string(cur_archive);
+	if (error == "") {
+		error = coarse_error;
+	}
+
+	return error;
 }

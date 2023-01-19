@@ -850,16 +850,6 @@ interest_report data_interest_type(const std::string & file_path,
 		DEFAULT_RECURSION_LEVEL, true);
 }
 
-/*std::string coarse_libarchive_error(int ret_val) {
-	switch(ret_val) {
-		case ARCHIVE_RETRY: return "ARCHIVE_RETRY";
-		case ARCHIVE_WARN: return "ARCHIVE_WARN";
-		case ARCHIVE_FAILED: return "ARCHIVE_FAILED";
-		case ARCHIVE_FATAL: return "ARCHIVE_FATAL";
-		default: return "Unknown libarchive error";
-	}
-}*/
-
 interest_report data_interest_archive(const std::string & file_path,
 	std::string mime_type, const std::vector<char> & contents_bytes,
 	int recursion_level) {
@@ -878,7 +868,26 @@ interest_report data_interest_archive(const std::string & file_path,
 	//bool clean_exit = true;
 	//ret_val = ARCHIVE_OK;
 
-	while (parse.read_next_metadata()) {
+	read_state header_status = AP_OK;
+	std::string error_msg;
+
+	std::string archive_hash = get_sha224(contents_bytes);
+
+	while (header_status != AP_ERROR && header_status != AP_DONE) {
+
+		header_status = parse.read_next_metadata();
+
+		if (header_status == AP_SKIP) {
+			error_msg = "Error reading header from archive " +
+				file_path + ": " + parse.get_error();
+			interesting_files += create_error_data(
+				error_msg, mime_type, archive_hash);
+			continue;
+		}
+
+		if (header_status == AP_ERROR || header_status == AP_DONE) {
+			continue;
+		}
 
 		interest_report interesting_in_file;
 		bool decompression_failure = false;
@@ -974,29 +983,14 @@ interest_report data_interest_archive(const std::string & file_path,
 		interesting_files += interesting_in_file;
 	}
 
-	if (!parse.clean_exit) {
-		std::string what;
+	if (header_status == AP_ERROR) {
+		error_msg = "Error reading from archive " + file_path + ": " +
+			parse.get_error();
 
-		if (parse.get_error() != "") {
-			what = "Error reading from archive " + file_path + ": " +
-				parse.get_error();
-		} else {
-			// TODO, make this proper again once the code has been ported
-			// up to the parser.
-			what = "Error reading from archive " + file_path;/* + ": " +
-				coarse_libarchive_error(ret_val);*/
-		}
-		
-		std::string archive_hash = get_sha224(contents_bytes);
 		interesting_files += create_error_data(
-			what, mime_type, archive_hash);
+			error_msg, mime_type, archive_hash);
 		return interesting_files;
 	}
-
-	/*if (archive_read_free(parse.cur_archive) != ARCHIVE_OK) {
-		throw(std::runtime_error("Error freeing archive " + file_path + ": " +
-			archive_error_string(parse.cur_archive)));
-	}*/
 
 	if (interesting_files.results.empty() && got_exception) {
 		throw(inherited_exception);

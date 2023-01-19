@@ -7,6 +7,24 @@
 #include <vector>
 #include <string>
 
+// The read_next_metadata method returns a read_state. These read
+// states are:
+//		- AP_OK:	Everything's OK, proceed as normal
+//		- AP_SKIP:  The metadata could not be read. It might be
+//					partially read (in which case the parser should try
+//					to extract), or not read at all, in which case the
+//					parser should skip to the next entry. In either case,
+//					get_error will contain more information about why the
+//					metadata could not be read.
+//		- AP_ERROR:	The archive is corrupted or encrypted and nothing more
+//					can be read at all. Skip.
+//		- AP_DONE:	Everything's OK but all the entries have been exhausted,
+//					so there's nothing more to be read from the archive.
+
+// TODO: Implement.
+
+enum read_state { AP_OK, AP_SKIP, AP_ERROR, AP_DONE };
+
 class archive_parser {
 	public:
 		virtual ~archive_parser() {};
@@ -15,7 +33,7 @@ class archive_parser {
 		virtual void read_archive(const std::vector<char> & contents_bytes) = 0;
 
 		// This reads the next entry's metadata (file size, etc).
-		virtual bool read_next_metadata() = 0;
+		virtual read_state read_next_metadata() = 0;
 
 		// Uncompress an entry (inner file) to the given vector, clearing it
 		// beforehand.
