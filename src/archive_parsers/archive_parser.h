@@ -33,7 +33,7 @@ class archive_parser {
 		virtual void read_archive(const std::vector<char> & contents_bytes) = 0;
 
 		// This reads the next entry's metadata (file size, etc).
-		virtual read_state read_next_metadata() = 0;
+		virtual read_state read_next_header() = 0;
 
 		// Uncompress an entry (inner file) to the given vector, clearing it
 		// beforehand.
@@ -41,7 +41,7 @@ class archive_parser {
 		virtual int uncompress_entry(std::vector<char> & unpacked_bytes_dest) = 0;
 
 		// Get an error, or empty string for none.
-		virtual std::string get_error() = 0;
+		virtual std::string get_error() const = 0;
 
 		// TODO? Manual cleanup for not keeping a bunch of archive data in
 		// memory any longer than needed???

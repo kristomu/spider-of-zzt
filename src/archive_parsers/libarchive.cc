@@ -38,7 +38,7 @@ void libarchive_parser::read_archive(const std::vector<char> & contents_bytes) {
 // TODO: use enum instead: OK, all done, recoverable error
 // (just go to the next one, but ask for an error first)
 // and unrecoverable error (stop).
-read_state libarchive_parser::read_next_metadata() {
+read_state libarchive_parser::read_next_header() {
 	int hdr_read_status = archive_read_next_header(cur_archive, &entry);
 	if (hdr_read_status != ARCHIVE_OK && hdr_read_status != ARCHIVE_WARN) {
 		// If the reason we stop parsing is unexpected, set a
@@ -71,7 +71,7 @@ int libarchive_parser::uncompress_entry(std::vector<char> &unpacked_bytes_dest) 
 		unpacked_bytes_dest.data(), unpacked_bytes_dest.size());
 }
 
-std::string libarchive_parser::get_error() {
+std::string libarchive_parser::get_error() const {
 	std::string error = archive_error_string(cur_archive);
 	if (error == "") {
 		error = coarse_error;

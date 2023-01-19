@@ -33,6 +33,7 @@
 #include "zzt_interesting.h"
 
 #include "../archive_parsers/libarchive.h"
+#include "../archive_parsers/lib7zip/lib7zip_parser.h"
 
 // ZZT-specific headers and constants
 
@@ -859,14 +860,14 @@ interest_report data_interest_archive(const std::string & file_path,
 	if (recursion_level <= 0) { return interesting_files; }
 
 	libarchive_parser parse;
+	// TODO: Enable once the known bugs and missing features in
+	// lib7zip_parser.h have been dealt with.
+	// lib7zip_parser parse;
 
-	//int ret_val;
 	parse.read_archive(contents_bytes);
 
 	std::runtime_error inherited_exception("placeholder");
 	bool got_exception = false;
-	//bool clean_exit = true;
-	//ret_val = ARCHIVE_OK;
 
 	read_state header_status = AP_OK;
 	std::string error_msg;
@@ -875,7 +876,7 @@ interest_report data_interest_archive(const std::string & file_path,
 
 	while (header_status != AP_ERROR && header_status != AP_DONE) {
 
-		header_status = parse.read_next_metadata();
+		header_status = parse.read_next_header();
 
 		if (header_status == AP_SKIP) {
 			error_msg = "Error reading header from archive " +
