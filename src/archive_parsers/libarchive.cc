@@ -16,7 +16,8 @@ std::string libarchive_parser::get_coarse_libarchive_error(
 // TODO: Clean up to properly return error values, etc.
 // But first get this working!
 
-void libarchive_parser::read_archive(const std::vector<char> & contents_bytes) {
+void libarchive_parser::read_archive(const std::string & file_path,
+	const std::vector<char> & contents_bytes) {
 	int ret_val;
 
 	cur_archive = archive_read_new();

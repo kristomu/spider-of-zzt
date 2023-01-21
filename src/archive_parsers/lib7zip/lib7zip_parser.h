@@ -69,7 +69,8 @@ class lib7zip_parser : public archive_parser {
 		}
 
 
-		void read_archive(const std::vector<char> & contents_bytes);
+		void read_archive(const std::string & file_path,
+			const std::vector<char> & contents_bytes);
 
 		// This reads the next entry's metadata (file size, etc).
 		read_state read_next_header();

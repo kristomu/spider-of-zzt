@@ -864,7 +864,7 @@ interest_report data_interest_archive(const std::string & file_path,
 	// lib7zip_parser.h have been dealt with.
 	// lib7zip_parser parse;
 
-	parse.read_archive(contents_bytes);
+	parse.read_archive(file_path, contents_bytes);
 
 	std::runtime_error inherited_exception("placeholder");
 	bool got_exception = false;

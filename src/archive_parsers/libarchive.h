@@ -28,7 +28,8 @@ class libarchive_parser : public archive_parser {
 		}
 
 		// This function reads the archive contained in contents_bytes.
-		void read_archive(const std::vector<char> & contents_bytes);
+		void read_archive(const std::string & file_path,
+			const std::vector<char> & contents_bytes);
 
 		// This reads the next entry's metadata (file size, etc).
 		read_state read_next_header();

@@ -4,7 +4,7 @@
 
 if [ -z "$LIB7ZIP_DIR" ]
 then
-	echo "lib7zip required! Set LIB7ZIP_DIR to its location."
+	echo "kristomu/lib7zip required! Set LIB7ZIP_DIR to its location."
 	exit
 fi
 

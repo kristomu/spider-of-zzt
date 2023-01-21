@@ -30,7 +30,8 @@ class archive_parser {
 		virtual ~archive_parser() {};
 
 		// This function reads the archive contained in contents_bytes.
-		virtual void read_archive(const std::vector<char> & contents_bytes) = 0;
+		virtual void read_archive(const std::string & file_path,
+			const std::vector<char> & contents_bytes) = 0;
 
 		// This reads the next entry's metadata (file size, etc).
 		virtual read_state read_next_header() = 0;

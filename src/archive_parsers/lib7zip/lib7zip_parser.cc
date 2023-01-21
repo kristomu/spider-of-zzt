@@ -21,17 +21,20 @@ std::vector<std::string> lib7zip_parser::get_supported_extensions() {
 
 // This function reads the archive contained in contents_bytes.
 void lib7zip_parser::read_archive(
+	const std::string & file_path,
 	const std::vector<char> & contents_bytes) {
 
 	// TODO: get the file format. Or circumvent the problem
 	// by modifying lib7zip.
-	in_stream.set("test.zip", contents_bytes);
+	in_stream.set(file_path, contents_bytes);
 	error_msg = "";
 
 	num_entries = 0;
 	next_entry = 0;
 
-	if (!lib.OpenArchive(&in_stream, &archive)) {
+	// Enable signature checking to also recognize archives with
+	// the wrong extension. (NOTE: This may fail for .dmg files.)
+	if (!lib.OpenArchive(&in_stream, &archive, true)) {
 		// That's all the error you get... Although for this, there's
 		// a particular workaround.
 		switch(lib.GetLastError()) {
@@ -114,10 +117,9 @@ int lib7zip_parser::uncompress_entry(std::vector<char> & unpacked_bytes_dest) {
 		out_stream.clear();
 		return bytes_unpacked;
 	} else {
-		// We can't get more informative error messages than this out of
-		// lib7zip, unfortunately.
-		// (TODO: Check if it marks wrong CRC errors as, well, errors.)
-		error_msg = "Data error.";
+		// Something went wrong; get the extract error from lib7zip.
+		std::wstring error_msg_wst = archive->GetLastExtractError();
+		error_msg = std::string(error_msg_wst.begin(), error_msg_wst.end());
 		return -1;
 	}
 }
