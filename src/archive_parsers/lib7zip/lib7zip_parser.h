@@ -48,11 +48,6 @@ class lib7zip_parser : public archive_parser {
 		std::string error_msg = "";
 
 	public:
-
-		std::string entry_pathname;
-		size_t entry_file_size;
-		bool clean_exit;
-
 		lib7zip_parser() {
 			archive = NULL;
 			archive_item = NULL;

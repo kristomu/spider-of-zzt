@@ -16,9 +16,6 @@ class libarchive_parser : public archive_parser {
 
 	public:
 
-		std::string entry_pathname;
-		size_t entry_file_size;
-
 		libarchive_parser() { cur_archive = NULL; }
 
 		~libarchive_parser() {

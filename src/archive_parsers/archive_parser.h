@@ -27,6 +27,11 @@ enum read_state { AP_OK, AP_SKIP, AP_ERROR, AP_DONE };
 
 class archive_parser {
 	public:
+		// These get filled out when we're uncompressing
+		// entries (files inside the archive).
+		std::string entry_pathname;		// Name of the file for this entry.
+		size_t entry_file_size;			// Its size.
+
 		virtual ~archive_parser() {};
 
 		// This function reads the archive contained in contents_bytes.

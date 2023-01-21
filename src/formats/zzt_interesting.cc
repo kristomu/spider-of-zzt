@@ -18,6 +18,7 @@
 #include <fstream>
 #include <iomanip>
 #include <sstream>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -851,20 +852,36 @@ interest_report data_interest_type(const std::string & file_path,
 		DEFAULT_RECURSION_LEVEL, true);
 }
 
-interest_report data_interest_archive(const std::string & file_path,
-	std::string mime_type, const std::vector<char> & contents_bytes,
-	int recursion_level) {
+// TODO: Quick and dirty factory-ish thing, fix later
+
+enum parser_type {PARSER_LIB7ZIP, PARSER_LIBARCHIVE};
+
+std::unique_ptr<archive_parser> generate_parser(parser_type type) {
+	switch(type) {
+		case PARSER_LIB7ZIP: return std::make_unique<lib7zip_parser>();
+		case PARSER_LIBARCHIVE: return std::make_unique<libarchive_parser>();
+		default: throw std::logic_error("Unknown parser type!");
+	}
+}
+
+// parse_type is the archive parser type that's being used.
+// file_path is the pathname to the archive.
+// mime_type is the mimetype of the archive.
+// contents_bytes is its contents.
+// recursion level is the current recursion level, used to prevent
+// things like zip bombs.
+interest_report data_interest_archive(parser_type parse_type,
+	const std::string & file_path, std::string mime_type,
+	const std::vector<char> & contents_bytes, int recursion_level) {
 
 	interest_report interesting_files;
 
 	if (recursion_level <= 0) { return interesting_files; }
 
-	libarchive_parser parse;
-	// TODO: Enable once the known bugs and missing features in
-	// lib7zip_parser.h have been dealt with.
-	// lib7zip_parser parse;
+	std::unique_ptr<archive_parser> parse = generate_parser(
+		parse_type);
 
-	parse.read_archive(file_path, contents_bytes);
+	parse->read_archive(file_path, contents_bytes);
 
 	std::runtime_error inherited_exception("placeholder");
 	bool got_exception = false;
@@ -876,11 +893,11 @@ interest_report data_interest_archive(const std::string & file_path,
 
 	while (header_status != AP_ERROR && header_status != AP_DONE) {
 
-		header_status = parse.read_next_header();
+		header_status = parse->read_next_header();
 
 		if (header_status == AP_SKIP) {
 			error_msg = "Error reading header from archive " +
-				file_path + ": " + parse.get_error();
+				file_path + ": " + parse->get_error();
 			interesting_files += create_error_data(
 				error_msg, mime_type, archive_hash);
 			continue;
@@ -893,19 +910,19 @@ interest_report data_interest_archive(const std::string & file_path,
 		interest_report interesting_in_file;
 		bool decompression_failure = false;
 
-		std::string inner_pathname = parse.entry_pathname;
+		std::string inner_pathname = parse->entry_pathname;
 
 		// Avoid ZIP bombs and other very large files. (32M max)
-		if (parse.entry_file_size > (1<<25)) { continue; }
+		if (parse->entry_file_size > (1<<25)) { continue; }
 
 		std::vector<char> unpacked_bytes;
-		int bytes_read = parse.uncompress_entry(unpacked_bytes);
+		int bytes_read = parse->uncompress_entry(unpacked_bytes);
 
 		// Check if the compression method is supported. If not, clear the data
 		// array so we can still check for extensions and the likes.
 		if (bytes_read < 0) {
 			decompression_failure = true;
-			interesting_in_file += create_error_data(parse.get_error(),
+			interesting_in_file += create_error_data(parse->get_error(),
 				"application/x-unknown", "???");
 			unpacked_bytes.resize(0);
 			bytes_read = 0;
@@ -986,7 +1003,7 @@ interest_report data_interest_archive(const std::string & file_path,
 
 	if (header_status == AP_ERROR) {
 		error_msg = "Error reading from archive " + file_path + ": " +
-			parse.get_error();
+			parse->get_error();
 
 		interesting_files += create_error_data(
 			error_msg, mime_type, archive_hash);
@@ -1109,6 +1126,16 @@ interest_report data_interest_type(const std::string & file_path,
 		}
 	}
 
+	/* TODO: These are supported by lib7zip:
+	001 7z a apm ar arj bz2 bzip2 cab chi chm chq chw cpio cramfs deb dll dmg doc docx elf
+	epub esd exe ext ext2 ext3 ext4 fat flv gpt gz gzip hfs hfsx hxi hxq hxr hxs hxw ihex
+	img iso jar lha lib lit lzh lzma lzma86 macho mbr msi mslz msp mub nsis ntfs ods odt ova
+	pkg pmd ppt qcow qcow2 qcow2c r00 rar rpm scap squashfs swf swm sys tar taz tbz tbz2 te
+	tgz tpz txz udf uefif vdi vhd vmdk wim xar xls xlsx xpi xz z z01 zip zipx.
+	Some of them are probably also supported by libarchive. In any case, update the
+	lists below to account for them. */
+
+
 	// I think I've got all the formats libarchive supports -- except mtree and zip.uu.
 	// NOTE: Apparently libarchive doesn't support .arj or .arc; I'm going to keep them
 	// here for now so that they auto-register as corrupted (and I can check them manually
@@ -1145,21 +1172,50 @@ interest_report data_interest_type(const std::string & file_path,
 
 	interest_report interesting_in_file;
 
+	// This currently only uses the lib7zip parser. I want to do the following
+	// later; once it's done, I can make it check both lib7zip and libarchive:
+	//	- Keep a track of every file that's been checked without error.
+	//	- Skip decompressing files that have been checked without error before,
+	//		unless they're archives (since delving further could give additional
+	//		info.)
+	//	- Retry files that led to errors; if we get something without error, then
+	//		discard the errors. (e.g. libarchive gets something that's Imploded
+	//		and lib7zip handles it properly.)
+
+	// One problem about this is that the capabilities may be different, e.g.
+	// suppose libarchive can't open exe files' resource forks but lib7zip can;
+	// and suppose there's an error in the exe file's resource fork; then naively
+	// executing point three above would erase the legitimate errors. This can be
+	// handled by only erasing errors for some given file (and marking it as
+	// processed) if we can actually open that file without error. In the example
+	// given, the resource fork virtual files wouldn't be opened at all by
+	// libarchive and so their errors wouldn't be touched; but pulling this off
+	// just right is going to take a bit of finagling.
+
+	// These parsers should also report what formats they can handle so that if I
+	// add lhasa later, it doesn't just blindly throw .zips etc. at it when it
+	// can only handle LHA, LZH, and LZS.
+
 	if (archive || maybe_archive) {
-		try {
-			interesting_in_file = data_interest_archive(
-				file_path, mime_type, contents_bytes, recursion_level);
-			if (!interesting_in_file.results.empty()) {
-				return interesting_in_file;
+		//for (parser_type type : {PARSER_LIB7ZIP, PARSER_LIBARCHIVE}) {
+		for (parser_type type : {PARSER_LIB7ZIP}) {
+			try {
+				interesting_in_file += data_interest_archive(type,
+					file_path, mime_type, contents_bytes, recursion_level);
+			} catch (const std::runtime_error & e) {
+				// Don't signal corrupt archive file for something that's primarily not
+				// an archive. And don't signal anything if the file is actually text/html,
+				// which happens pretty often when crawling web pages.
+				if (!maybe_archive && magic_mime_type != "text/html") {
+					interesting_in_file += create_error_data(
+						std::string("Corrupt archive file: ") +
+							e.what(), mime_type, hash);
+				}
 			}
-		} catch (const std::runtime_error & e) {
-			// Don't signal corrupt archive file for something that's primarily not
-			// an archive. And don't signal anything if the file is actually text/html,
-			// which happens pretty often when crawling web pages.
-			if (!maybe_archive && magic_mime_type != "text/html") {
-				return create_error_data(std::string("Corrupt archive file: ") +
-					e.what(), mime_type, hash);
-			}
+		}
+
+		if (!interesting_in_file.results.empty()) {
+			return interesting_in_file;
 		}
 	}
 
