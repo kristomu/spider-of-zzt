@@ -918,20 +918,20 @@ interest_report data_interest_archive(parser_type parse_type,
 		std::vector<char> unpacked_bytes;
 		int bytes_read = parse->uncompress_entry(unpacked_bytes);
 
-		// Check if the compression method is supported. If not, clear the data
-		// array so we can still check for extensions and the likes.
+		// Check if the compression method is supported. If not, insert
+		// an error to this effect.
 		if (bytes_read < 0) {
 			decompression_failure = true;
 			interesting_in_file += create_error_data(parse->get_error(),
 				"application/x-unknown", "???");
-			unpacked_bytes.resize(0);
-			bytes_read = 0;
+			// Try anyway :-) Maybe the corruption is not so bad and we
+			// can still recognize something.
 		}
 
 		std::string file_and_inner = file_path + "/" + inner_pathname;
 
 		try {
-			if (decompression_failure && bytes_read == 0) {		// ????
+			if (decompression_failure) {
 				// Propagate a mime-type telling the function that we don't
 				// know what the file is because we couldn't decompress it.
 				interesting_in_file += data_interest_type( file_and_inner,
