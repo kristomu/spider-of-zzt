@@ -1170,6 +1170,9 @@ interest_report data_interest_type(const std::string & file_path,
 		maybe_archive = str_contains(extension, possible_archive_extensions);
 	}
 
+	// Empty files aren't archives.
+	archive &= !contents_bytes.empty();
+
 	interest_report interesting_in_file;
 
 	// This currently only uses the lib7zip parser. I want to do the following
@@ -1181,6 +1184,10 @@ interest_report data_interest_type(const std::string & file_path,
 	//	- Retry files that led to errors; if we get something without error, then
 	//		discard the errors. (e.g. libarchive gets something that's Imploded
 	//		and lib7zip handles it properly.)
+	//	- Memoize internal archive extraction so that e.g. "lib7zip extracts
+	//		foo.zip, libarchive extracts foo.zip/bar.zip" vs "libarchive
+	//		extracts both foo.zip and foo.zip/bar.zip" doesn't cause a
+	//		combinatorial explosion.
 
 	// One problem about this is that the capabilities may be different, e.g.
 	// suppose libarchive can't open exe files' resource forks but lib7zip can;
@@ -1204,9 +1211,11 @@ interest_report data_interest_type(const std::string & file_path,
 					file_path, mime_type, contents_bytes, recursion_level);
 			} catch (const std::runtime_error & e) {
 				// Don't signal corrupt archive file for something that's primarily not
-				// an archive. And don't signal anything if the file is actually text/html,
+				// an archive. And don't signal anything if the file is actually text,
 				// which happens pretty often when crawling web pages.
-				if (!maybe_archive && magic_mime_type != "text/html") {
+				std::string mime_category(magic_mime_type.begin(),
+					magic_mime_type.begin() + magic_mime_type.find("/"));
+				if (!maybe_archive && mime_category != "text") {
 					interesting_in_file += create_error_data(
 						std::string("Corrupt archive file: ") +
 							e.what(), mime_type, hash);

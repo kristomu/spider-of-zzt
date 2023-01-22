@@ -2,6 +2,17 @@
 #include <src/lib7zip.h>
 
 #include <stdexcept>
+#include <locale>
+#include <codecvt>
+
+// StackOverflow wide string to string conversion.
+// https://stackoverflow.com/a/18374698
+std::string ws2s(const std::wstring& wstr) {
+	using convert_typeX = std::codecvt_utf8<wchar_t>;
+	std::wstring_convert<convert_typeX, wchar_t> converterX;
+
+	return converterX.to_bytes(wstr);
+}
 
 std::vector<std::string> lib7zip_parser::get_supported_extensions() {
 	WStringArray exts;
@@ -24,8 +35,6 @@ void lib7zip_parser::read_archive(
 	const std::string & file_path,
 	const std::vector<char> & contents_bytes) {
 
-	// TODO: get the file format. Or circumvent the problem
-	// by modifying lib7zip.
 	in_stream.set(file_path, contents_bytes);
 	error_msg = "";
 
@@ -58,8 +67,8 @@ void lib7zip_parser::read_archive(
 	archive->GetItemCount(&num_entries);
 }
 
-// This reads the next entry's metadata (file size, etc). Return false if there
-// are no more.
+// This reads the next entry's metadata (file size, etc).
+// Return false if there are no more.
 // TODO: use enum instead: OK, all done, recoverable error
 // (just go to the next one, but ask for an error first)
 // and unrecoverable error (stop).
@@ -94,7 +103,10 @@ read_state lib7zip_parser::read_next_header() {
 			lib7zip::kpidPath, pathname)) {
 			entry_pathname = "<UNKNOWN>";
 		} else {
-			entry_pathname = std::string(pathname.begin(), pathname.end());
+			// This might produce weird results if the archive isn't using
+			// Unicode. If that happens, I'll replace this with a censor
+			// thing similar to libarchive.
+			entry_pathname = ws2s(pathname);
 		}
 		return AP_OK;
 	} else {
@@ -118,8 +130,7 @@ int lib7zip_parser::uncompress_entry(std::vector<char> & unpacked_bytes_dest) {
 		return bytes_unpacked;
 	} else {
 		// Something went wrong; get the extract error from lib7zip.
-		std::wstring error_msg_wst = archive->GetLastExtractError();
-		error_msg = std::string(error_msg_wst.begin(), error_msg_wst.end());
+		error_msg = ws2s(archive->GetLastExtractError());
 		return -1;
 	}
 }
