@@ -4,10 +4,12 @@
 #include <fstream>
 #include <sys/stat.h>
 
-// https://stackoverflow.com/questions/4553012
+// https://stackoverflow.com/questions/4553012 and https://stackoverflow.com/a/230068/6183577
 bool is_file(std::string filename) {
 	struct stat path_stat;
-	stat(filename.data(), &path_stat);
+	if (stat(filename.data(), &path_stat) != 0) {
+		return false;
+	}
 	return S_ISREG(path_stat.st_mode);
 }
 

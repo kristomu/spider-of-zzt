@@ -11,7 +11,7 @@ int main(int argc, char ** argv) {
 	}
 
 	for (int i = 1; i < argc; ++i) {
-		// Skip over directories.
+		// Skip over directories and stuff that doesn't exist.
 		if (!is_file(argv[i])) { continue; }
 
 		std::cerr << argv[i] << std::endl;
