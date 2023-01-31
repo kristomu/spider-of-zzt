@@ -1150,7 +1150,18 @@ interest_report data_interest_type(const std::string & file_path,
 
 	std::vector<std::string> archive_extensions = {".zip", ".gz", ".tar", ".arj",
 		".lzh", ".rar", ".cpio", ".iso", ".cab", ".ar", ".bz2", ".lz4",
-		".lzo", ".lzop", ".lzs", ".lzw", ".7z", ".xz"
+		".lzo", ".lzop", ".lzs", ".lzw", ".7z", ".xz",
+		// These are only for lib7zip: fix when I implement multiple parsers.
+		".001", ".7z", ".apm", ".ar", ".arj", ".bz2", ".bzip2", ".cab", ".chi", ".chm",
+		".chq", ".chw", ".cpio", ".cramfs", ".deb", ".dmg", ".epub", ".esd", ".ext",
+		".ext2", ".ext3", ".ext4", ".fat", ".gpt", ".gz", ".gzip", ".hfs", ".hfsx",
+		".hxi", ".hxq", ".hxr", ".hxs", ".hxw", ".ihex", ".img", ".iso", ".jar",
+		".lha", ".lib", ".lit", ".lzh", ".lzma", ".lzma86", ".macho", ".mbr",
+		".msi", ".mslz", ".mub", ".nsis", ".ntfs", ".ods", ".odt", ".ova" ".pkg",
+		".pmd", ".qcow", ".qcow2", ".qcow2c", ".r00", ".rar", ".rpm", ".scap",
+		".squashfs", ".tar", ".taz", ".tbz", ".tbz2", ".tgz", ".tpz", ".txz",
+		".udf", ".uefif", ".vdi", ".vhd", ".vmdk", ".wim", ".xar", ".xz", ".z",
+		".z01", ".zip", ".zipx"
 	};
 
 	// These can be archives, but also have other uses: don't count corrupt results
@@ -1159,7 +1170,9 @@ interest_report data_interest_type(const std::string & file_path,
 		"application/x-dosexec", "application/octet-stream",
 	};
 
-	std::vector<std::string> possible_archive_extensions = { ".exe" };
+	std::vector<std::string> possible_archive_extensions = { ".exe", ".dll",
+		".a", ".so", ".flv", ".msp", ".ppt", ".swf", ".swm", ".sys",
+		".doc", "docx", ".elf", ".xls", ".xlsx", ".xpi"};
 
 	// If it's an archive, test separately.
 	bool archive = str_contains(mime_type, archive_mimetypes) ||
